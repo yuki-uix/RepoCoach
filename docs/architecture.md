@@ -112,7 +112,7 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 - 记录本轮所有工具返回的 (path, 行号范围)，供证据接地校验；
 - 将模型输出解析为 `AgentDecision` 并做 Schema 校验。
 
-第一版模型使用 DeepSeek `deepseek-v4-flash`。API Key 从仓库根目录的 `.local` 文件读取（已 gitignore），只在服务端使用，不进日志。模型调用封装在独立 provider 接口后，保持可替换。
+第一版模型使用 DeepSeek `deepseek-v4-flash`。API Key 从仓库根目录的 `.env.local` 读取（已被 `.env.*` 忽略规则覆盖），只在服务端使用，不进日志。模型调用封装在独立 provider 接口后，保持可替换。
 
 ### Evidence Store
 

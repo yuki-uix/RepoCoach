@@ -93,7 +93,7 @@ RepoCoach 需要逐步实现：
 - git 浅克隆 + ripgrep（源码检索，GitHub API 只用于仓库元数据）
 - JSON 文件 Session 持久化
 - 自实现 Agent tool loop
-- 模型：DeepSeek `deepseek-v4-flash`（API Key 放在仓库根目录 `.local` 文件，已加入 `.gitignore`，不得提交）
+- 模型：DeepSeek `deepseek-v4-flash`（API Key 放在仓库根目录 `.env.local`，已被 `.gitignore` 覆盖，不得提交）
 
 第二阶段（假设验证通过后）：
 
