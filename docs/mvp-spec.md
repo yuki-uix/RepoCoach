@@ -77,12 +77,20 @@ recap
 - `package.json` 摘要
 - 可学习功能候选
 
+实现方式：
+
+- GitHub API 只用于获取仓库元数据；
+- 源码通过 `git clone --depth 1 --filter=blob:none` 浅克隆到隔离临时目录，支持任意分支或 commit SHA；
+- 检索和读取全部在本地文件系统进行（ripgrep + 行号切片）；
+- 按 (repo, sha) 缓存克隆结果。
+
 约束：
 
 - 只允许公开仓库；
 - 限制文件数量和总大小；
 - 忽略 `node_modules`、构建产物、二进制和密钥文件；
-- 不执行安装脚本或仓库脚本。
+- 不执行安装脚本或仓库脚本（克隆只获取文件文本，不运行任何仓库代码）；
+- Monorepo 需先解析 workspaces，功能候选限定在单个 package 内。
 
 ### 5.2 Feature Trace
 
@@ -111,6 +119,8 @@ type Evidence = {
 
 如果无法找到足够证据，Agent 必须明确标记不确定，而不是编造文件或行号。
 
+证据采用**构造性接地**：`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)。服务端持有工具返回记录做交集校验——范围合法但内容未被读取过的引用一律拒绝，模型无法凭空构造引用。
+
 ### 5.4 学习复盘
 
 复盘至少包含：
@@ -123,6 +133,8 @@ type Evidence = {
 - 面试官可能继续追问的问题；
 - 推荐下一步。
 
+复盘同时记录 Session 总耗时和用户自评（能否复述这条链路），作为"15 分钟内理解并复述"这一目标的测量数据。单轮响应涉及多次工具调用（预期 20–60s），必须流式输出让等待可视化。
+
 ## 6. 领域模型
 
 ```ts
@@ -133,6 +145,7 @@ type Repository = {
   name: string;
   ref: string;
   language: "typescript" | "javascript";
+  workspacePath?: string; // monorepo 时指向选定的 package
 };
 
 type FeatureCandidate = {
@@ -167,10 +180,10 @@ type LearningTurn = {
 第一版只开放只读工具：
 
 - `repo_get_tree`
-- `repo_search`
+- `repo_search`（本地 ripgrep，返回准确行号和上下文行）
 - `repo_read_file`
 - `repo_get_package_info`
-- `repo_save_evidence`
+- `repo_save_evidence`（只接受本轮工具返回过的引用，见 5.3 构造性接地）
 
 明确禁止：
 
@@ -182,18 +195,18 @@ type LearningTurn = {
 
 ## 8. 验收标准
 
-MVP 只有在以下条件都满足时才算完成：
+MVP 只有在以下条件都满足时才算完成（每条标注判定方式）：
 
-- 用户可以从 URL 开始一次完整 Session；
-- Agent 能推荐至少一个合理的功能路径；
-- Agent 会让用户先回答；
-- 重要结论包含有效的文件路径和行号；
-- 错误理解可以被识别并反馈；
-- Agent 会根据用户回答改变下一轮问题；
-- Session 能保存并恢复；
-- 不执行目标仓库代码；
+- 用户可以从 URL 开始一次完整 Session（fixture + Zod 上端到端跑通）；
+- Agent 推荐的功能路径在 fixture repo 上命中预置的候选白名单；
+- Agent 会让用户先回答：trace 阶段前必须存在一轮用户回答（状态机保证，自动化断言）；
+- 重要结论的证据全部通过构造性接地校验（引用必须来自本轮工具返回记录）；
+- 错误理解可以被识别：fixture 的标注回答样本集上，assessment 与标注一致率达到阈值（初始 ≥ 80%）；
+- Agent 会根据用户回答改变下一轮问题：同一问题分别灌入答对 / 答错样本，下一轮问题可判定地不同；
+- Session 能保存并恢复（中断后从 JSON 恢复继续，自动化测试）；
+- 不执行目标仓库代码（Reader 无任何 exec 路径，代码审查确认）；
 - fixture repo 有自动化回归测试；
-- 证据不足时不会伪造结论。
+- 证据不足时不会伪造结论：fixture 中有意设计的错误路径上，Agent 输出 unknown 而非编造。
 
 ## 9. 非目标
 

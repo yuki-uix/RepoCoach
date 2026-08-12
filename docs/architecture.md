@@ -16,41 +16,47 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 ### Runtime 可替换
 
-Pi SDK 可以作为第一版的 Agent runtime，但仓库分析、证据模型、学习状态机和评估逻辑应该保持独立。
+仓库分析、证据模型、学习状态机和评估逻辑保持独立，不绑定任何 Agent runtime。第一版直接用一个自实现的 tool loop（约 200 行）驱动模型；Pi SDK 作为后续候选，在垂直切片验证核心假设之后再评估是否接入。
+
+### 证据构造性接地
+
+模型不能凭空写出证据引用。`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)，由服务端持有工具返回记录做交集校验。幻觉引用在架构上被拒绝，而不是靠事后评估测量。
 
 ## 2. 逻辑架构
 
 ```text
 ┌──────────────────────┐
-│       Web UI         │
+│  CLI（第一版入口）    │
 │  Import / Session    │
 │  Evidence / Recap    │
 └──────────┬───────────┘
-           │ HTTP / SSE
+           │
 ┌──────────▼───────────┐
-│    Application API    │
-│  Session orchestration│
-│  Validation / limits  │
+│ Learning Orchestrator │
+│  状态机 / 轮数限制    │
+│  Schema 校验 / 预算   │
 └──────┬─────────┬──────┘
        │         │
 ┌──────▼─────┐ ┌─▼────────────────┐
-│ Pi Agent   │ │ Repository Reader │
-│ Session    │ │ GitHub API        │
-│ State loop │ │ Search / Read     │
+│ Agent Loop │ │ Repository Reader │
+│ 自实现     │ │ git clone (浅)    │
+│ tool loop  │ │ ripgrep 本地检索  │
 └──────┬─────┘ └─────────┬─────────┘
        │                 │
        └────────┬────────┘
                 ▼
         ┌───────────────┐
-        │ PostgreSQL    │
-        │ Repo / Session│
+        │ Session Store │
+        │ JSON 文件     │
         │ Turns / Eval  │
         └───────────────┘
 ```
 
+第一版是一个 CLI 垂直切片，用于验证核心假设。Web UI（Next.js + SSE）、PostgreSQL + Drizzle、Pi SDK 均为验证通过后的第二阶段，接口按可替换设计（Session Store 抽象为接口，JSON 实现和未来的 Drizzle 实现互换）。
+
 ## 3. 模块边界
 
-### Web UI
+### CLI / Web UI
 
 负责：
 
@@ -66,43 +72,54 @@ Pi SDK 可以作为第一版的 Agent runtime，但仓库分析、证据模型�
 - 解析仓库；
 - 判断用户回答是否正确。
 
+第一版为 CLI；Web UI 属于第二阶段，接口不变。
+
 ### Repository Reader
 
 负责：
 
 - GitHub URL 解析；
-- 仓库元数据获取；
-- 目录树获取；
-- 文件搜索；
+- 仓库元数据获取（GitHub API 仅用于此处）；
+- 浅克隆：`git clone --depth 1 --filter=blob:none`，支持指定分支或 commit SHA，克隆到隔离临时目录；
+- 按 (repo, sha) 缓存已克隆的仓库，同一仓库的多个 Session 不重复克隆；
+- 目录树获取（本地文件系统遍历）；
+- 文件搜索（ripgrep，返回准确行号和上下文行）；
 - 文件读取和行号切片；
 - 文件类型、大小和路径过滤。
+
+不使用 GitHub Code Search API 做源码检索：它只索引默认分支、无法配合任意 commit SHA、不返回行号、速率限制（10 req/min）撑不起单 Session 的多轮工具调用。克隆只获取文件文本，不执行任何仓库代码，不违反只读边界。
+
+Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `package.json` 的 workspaces 字段，功能候选推荐时限定在单个 package 内。
 
 ### Learning Orchestrator
 
 负责：
 
-- 状态转换；
+- 状态转换（`phase` 由应用层持有并作为入参传给 Agent，模型不决定阶段）；
 - 当前功能和学习目标；
-- 最大轮数和 Token 预算；
+- 最大轮数（默认 5）和 Token 预算（初始值：单 Session 上限 200k input / 20k output tokens，随 eval 调整）；
 - 调用 Agent；
 - 保存每一轮结果。
 
-### Pi Agent Adapter
+### Agent Loop
 
 负责：
 
-- 创建和恢复 Agent Session；
+- 自实现的 tool loop：组装 prompt → 调模型 → 执行工具调用 → 回填结果，直到模型产出结构化决策；
 - 注册只读仓库工具；
-- 传递结构化上下文；
-- 处理流式输出和工具事件；
-- 将 Agent 输出转换成产品领域模型。
+- 传递结构化上下文（当前 phase、功能目标、历史轮次摘要）；
+- 流式输出，让工具调用和推理过程对用户可见（单轮预期 20–60s，等待必须可视化）；
+- 记录本轮所有工具返回的 (path, 行号范围)，供证据接地校验；
+- 将模型输出解析为 `AgentDecision` 并做 Schema 校验。
+
+第一版模型使用 DeepSeek `deepseek-v4-flash`。API Key 从仓库根目录的 `.local` 文件读取（已 gitignore），只在服务端使用，不进日志。模型调用封装在独立 provider 接口后，保持可替换。
 
 ### Evidence Store
 
 负责：
 
 - 保存文件路径、行号和引用原因；
-- 校验引用范围；
+- 构造性接地校验：引用必须出现在本轮工具返回记录中，范围合法但内容未被读取过的引用一律拒绝；
 - 让复盘页面可以回到原始源码上下文。
 
 ## 4. 学习状态机
@@ -129,37 +146,36 @@ feedback
   └─ 当前链路完成 → recap
 ```
 
-状态转换应由应用层控制，不能完全交给模型自由决定。
+状态转换由应用层控制。`phase` 是 Orchestrator 持有的状态，作为输入传给模型；模型输出的 `nextAction` 只是**建议**，是否转换阶段由 Orchestrator 按状态机规则决定。
 
 ## 5. Agent 输出约束
 
 模型输出必须经过 Schema 校验，至少包含：
 
-- 当前阶段；
 - 给用户的问题；
-- 需要检索的意图；
 - 证据列表；
 - 对用户回答的判断；
-- 下一步动作。
+- 下一步动作建议。
 
 示例：
 
 ```ts
 type AgentDecision = {
-  phase: "hypothesis" | "trace" | "questioning" | "feedback" | "recap";
   question?: string;
   evidence: Evidence[];
   assessment?: "correct" | "partial" | "incorrect" | "unknown";
   feedback?: string;
-  nextAction: "ask" | "show_evidence" | "finish";
+  nextAction: "ask" | "show_evidence" | "finish"; // 建议，由 Orchestrator 裁决
 };
 ```
+
+`phase` 不在模型输出中——它是 Orchestrator 传入的上下文，模型无权修改。
 
 ## 6. 安全边界
 
 目标仓库可能包含恶意 Prompt、安装脚本或伪装成说明文档的指令。因此：
 
-- README 和源码只作为数据，不作为 Agent 指令；
+- README 和源码只作为数据，不作为 Agent 指令：文件内容注入 prompt 时必须包裹在明确的数据分隔标记内，并且永远不进入 system prompt；
 - 不执行 `package.json` 中的脚本；
 - 不运行 `npm install`、构建或测试；
 - 不开放 bash 工具；
@@ -178,7 +194,8 @@ type AgentDecision = {
 - 预期调用链；
 - 关键证据文件和行号；
 - 容易混淆的同名模块；
-- 一个有意设计的错误路径。
+- 一个有意设计的错误路径；
+- 一组标注过的用户回答样本（正确 / 部分正确 / 错误），用于自动化测试 assessment 和追问适应性。
 
 ### 真实仓库 eval
 
@@ -191,18 +208,25 @@ type AgentDecision = {
 - Evidence precision：引用是否真的支持结论；
 - Path accuracy：调用链是否走对；
 - Question relevance：问题是否与当前功能相关；
-- Adaptation：用户答错后是否改变追问；
-- Hallucination rate：不存在的文件、函数和行号比例；
-- Session completion：用户是否能完成一条链路。
+- Adaptation：fixture 上同一问题分别灌入答对 / 答错样本，下一轮问题必须可判定地不同（不能是同一问题换措辞）；
+- Hallucination rate：由构造性接地保证引用层为零，eval 转为测量结论文本中提及的不存在函数 / 模块名；
+- Session completion：用户是否能完成一条链路；
+- 单 Session 成本与耗时：token 用量和 wall-clock 时间，守住 15 分钟目标。
 
 ## 8. 实施顺序
 
-1. 初始化 Next.js / TypeScript 工程；
-2. 实现 fixture repo 和只读 Repository Reader；
-3. 实现仓库导入 API；
-4. 实现 Feature Trace 状态机；
-5. 接入 Pi AgentSession；
-6. 实现证据展示和 Session 持久化；
-7. 加入 eval、日志、错误处理和限制；
-8. 用 Zod 和 Hono 做真实仓库验证。
+第一阶段（CLI 垂直切片，验证核心假设）：
+
+1. 初始化 TypeScript 工程（无 Next.js）；
+2. 实现 fixture repo 和只读 Repository Reader（浅克隆 + ripgrep）；
+3. 实现 Feature Trace 状态机和自实现 Agent loop；
+4. 实现证据接地校验和 JSON Session 持久化；
+5. 加入 fixture eval、日志、错误处理和限制；
+6. 用 Zod 和 Hono 做真实仓库验证，确认"提问优于总结"的假设成立。
+
+第二阶段（假设验证通过后）：
+
+7. Next.js Web UI + SSE 流式展示；
+8. PostgreSQL + Drizzle 替换 JSON Session Store；
+9. 评估是否接入 Pi SDK 替换自实现 loop。
 

@@ -72,7 +72,7 @@ RepoCoach 需要逐步实现：
 - 结构化输出和 Schema 校验
 - Agent traces、评估和回归测试
 
-计划使用 TypeScript 全栈，并将 Pi SDK 作为 Agent runtime 的候选底座。产品层仍然自己实现学习状态机、证据引用、Session 数据和评估逻辑。
+第一版使用 TypeScript + 自实现的 Agent tool loop，学习状态机、证据引用、Session 数据和评估逻辑全部由产品层实现。Pi SDK 作为后续 Agent runtime 的候选，在垂直切片验证核心假设后再评估接入。
 
 ## 测试仓库
 
@@ -86,12 +86,20 @@ RepoCoach 需要逐步实现：
 
 ## 计划中的技术栈
 
-- Next.js + TypeScript
+第一阶段（CLI 垂直切片）：
+
+- TypeScript
+- Zod（Schema 校验）
+- git 浅克隆 + ripgrep（源码检索，GitHub API 只用于仓库元数据）
+- JSON 文件 Session 持久化
+- 自实现 Agent tool loop
+- 模型：DeepSeek `deepseek-v4-flash`（API Key 放在仓库根目录 `.local` 文件，已加入 `.gitignore`，不得提交）
+
+第二阶段（假设验证通过后）：
+
+- Next.js + Tailwind CSS
 - PostgreSQL + Drizzle
-- Zod
-- GitHub API
-- Pi SDK / AgentSession
-- Tailwind CSS
+- Pi SDK / AgentSession（候选）
 
 具体实现会优先保持模块可替换，避免把 RepoCoach 的学习逻辑绑定在单一模型或 Agent runtime 上。
 
@@ -99,9 +107,9 @@ RepoCoach 需要逐步实现：
 
 应用代码尚未开始搭建。下一步会先完成：
 
-1. 初始化 Next.js 和 TypeScript 工程；
-2. 建立仓库导入和只读检索接口；
-3. 用 fixture repo 跑通第一条 Feature Trace 流程。
+1. 初始化 TypeScript 工程；
+2. 建立仓库导入（浅克隆）和只读检索（ripgrep）接口；
+3. 用 fixture repo 跑通第一条 CLI 版 Feature Trace 流程。
 
 ## 文档
 
