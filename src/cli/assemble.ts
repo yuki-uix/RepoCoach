@@ -107,16 +107,29 @@ export interface SessionAssembly {
 export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
   const repoRoot = deps.repoRoot ?? defaultRepoRoot();
   const dataDir = deps.dataDir ?? DEFAULT_DATA_DIR;
-  const provider = deps.provider ?? buildDefaultProvider(deps, repoRoot);
   const reader =
     deps.reader ?? createReader({ cacheRoot: deps.cacheRoot ?? join(dataDir, "repos") });
   const store = deps.store ?? new JsonSessionStore(dataDir);
   const evidenceStore = deps.evidenceStore ?? new InMemoryEvidenceStore();
   const candidateProvider = deps.candidateProvider ?? defaultCandidateProvider(reader, repoRoot);
 
+  // `list` never touches the provider, so defer `loadConfig` (and the
+  // `.env.local` read it implies) until something actually asks for it — the
+  // first `buildOrchestrator` or an explicit `provider` access. This keeps
+  // `list` working without an API key.
+  let provider: ChatProvider | undefined;
+  const getProvider = (): ChatProvider => {
+    if (provider === undefined) {
+      provider = deps.provider ?? buildDefaultProvider(deps, repoRoot);
+    }
+    return provider;
+  };
+
   return {
     reader,
-    provider,
+    get provider() {
+      return getProvider();
+    },
     store,
     evidenceStore,
     candidateProvider,
@@ -131,7 +144,7 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
         sessionId,
       });
       const loop = new AgentLoop({
-        provider,
+        provider: getProvider(),
         reader,
         repo,
         model: DEFAULT_DEEPSEEK_MODEL,

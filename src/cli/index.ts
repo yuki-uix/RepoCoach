@@ -106,7 +106,7 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
     const candidates = asm.candidateProvider.listCandidates(repo);
     const candidate = await selectCandidate(candidates, prompt.question, asm.stdout);
     const session = asm.store.createSession({
-      repositoryId: repositoryIdFromRepo(repo),
+      repositoryId: repositoryIdWithSha(repo),
       featureId: candidate.id,
     });
     const runner = buildRunner(asm, repo, session.id, featureGoal(candidate), prompt.question);
@@ -122,7 +122,14 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
   const prompt = makePrompt(asm.stdin, asm.stdout);
   try {
     const resumed = resumeSession(asm.store, sessionId);
-    const repo = await asm.reader.importRepository(resumed.session.repositoryId);
+    const { input, sha } = splitRepositoryId(resumed.session.repositoryId);
+    const repo = await asm.reader.importRepository(input, sha);
+    if (sha === undefined) {
+      asm.stderr.write(
+        `Warning: session ${resumed.sessionId} has no pinned commit SHA; ` +
+          `resuming against the current repository state (content may have changed).\n`,
+      );
+    }
     const candidates = asm.candidateProvider.listCandidates(repo);
     const goal = resolveFeatureGoal(candidates, resumed.session.featureId);
     const runner = buildRunner(asm, repo, resumed.sessionId, goal, prompt.question);
@@ -258,6 +265,39 @@ function repositoryIdFromRepo(repo: Repository): string {
     return `https://github.com/${repo.source.owner}/${repo.source.name}`;
   }
   return repo.source.path;
+}
+
+/** A full git commit SHA — the suffix a session pins a repository to. */
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Persist the repository id together with the commit the session was started
+ * at, as `url#sha`. Local checkouts also record their HEAD SHA so a resumed
+ * session knows exactly what it analysed; a non-git path has no SHA and stays
+ * a bare path (backward compatible — a legacy id without `#` carries none).
+ */
+export function repositoryIdWithSha(repo: Repository): string {
+  const base = repositoryIdFromRepo(repo);
+  return repo.sha === "" ? base : `${base}#${repo.sha}`;
+}
+
+/**
+ * Split a persisted repository id back into the import input and the pinned
+ * commit SHA (if one was recorded). A `#` not followed by a full SHA is left
+ * in place, so local paths containing `#` survive a round-trip.
+ */
+export function splitRepositoryId(repositoryId: string): {
+  input: string;
+  sha?: string;
+} {
+  const hash = repositoryId.lastIndexOf("#");
+  if (hash === -1) {
+    return { input: repositoryId };
+  }
+  const candidate = repositoryId.slice(hash + 1);
+  return FULL_SHA_RE.test(candidate)
+    ? { input: repositoryId.slice(0, hash), sha: candidate }
+    : { input: repositoryId };
 }
 
 function parseArgs(argv: string[]): {
