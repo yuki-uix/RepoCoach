@@ -283,10 +283,11 @@ const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 /**
  * Persist the repository id together with the commit the session was started
  * at, as `url#sha`. A local path records its HEAD SHA only when it is itself a
- * clean git repo root (so a resume can pin that exact commit); a subdirectory
- * of a repo, a non-git path, or a dirty working tree has no SHA (`headSha`
- * returns "") and stays a bare path, so a resume honestly analyses the current
- * working tree. A legacy id without `#` carries none either.
+ * git repo root whose working tree faithfully reproduces HEAD — clean (no
+ * staged/modified/untracked files) and free of readable ignored files — so a
+ * resume can pin that exact commit. A subdirectory of a repo, a non-git path,
+ * or such a dirty tree has no SHA (`headSha` returns "") and stays a bare path.
+ * A legacy id without `#` carries none either.
  */
 export function repositoryIdWithSha(repo: Repository): string {
   const base = repositoryIdFromRepo(repo);

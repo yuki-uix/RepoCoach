@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cloneRepo, type GitRunner } from "../../src/reader/clone";
 import { readFileSlice } from "../../src/reader/read-file";
-import { cleanupDir, createTempRepo, runGit } from "./helpers";
+import { cleanupDir, createTempRepo, runGit, writeFiles } from "./helpers";
 
 const tempDirs: string[] = [];
 
@@ -138,5 +138,61 @@ describe("cloneRepo", () => {
       });
       expect(sha).toBe(repo.sha);
     }
+  });
+
+  it("does not pin a local root with a readable ignored file", async () => {
+    // The .gitignore is committed, so the tree is clean except for the ignored
+    // file — which the tree walker would still read (it ignores .gitignore).
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "generated.ts\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "generated.ts": "export const x = 1;\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).toBe(repo.dir);
+    expect(sha).toBe("");
+  });
+
+  it("still pins a local root whose ignored entries are excluded directories", async () => {
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "node_modules/\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "node_modules/pkg.js": "x\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).toBe(repo.dir);
+    expect(sha).toBe(repo.sha);
+  });
+
+  it("does not pin a local root when an ignored directory holds a readable file", async () => {
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "generated/\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "generated/out.ts": "export const y = 1;\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).toBe(repo.dir);
+    expect(sha).toBe("");
   });
 });

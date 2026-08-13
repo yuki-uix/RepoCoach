@@ -100,6 +100,59 @@ describe("CLI resume pins a local git-root path to its SHA (P1)", () => {
     expect(readFileSlice(resumedImport!.rootDir, "a.txt").content).toBe("old");
   });
 
+  it("resumes the pinned SHA when the working tree was later dirtied without a commit", async () => {
+    const repo = await createTempRepo({ "a.txt": "old\n" });
+    tempDirs.push(repo.dir);
+    const oldSha = repo.sha;
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+    const dataDir = makeDataDir();
+
+    const reader = recordingReader(createReader({ cacheRoot }));
+
+    // Phase 1 — start from the clean local git root, then crash on the first
+    // agent call so the session stays active (orientation), like an interrupt.
+    const streams1 = capturedStreams();
+    streams1.stdin.write("1\n");
+    const code1 = await runCli(["start", repo.dir], {
+      dataDir,
+      reader,
+      provider: crashingProvider(),
+      stdin: streams1.stdin,
+      stdout: streams1.stdout,
+      stderr: streams1.stderr,
+    });
+    streams1.stdin.end();
+    expect(code1).toBe(1);
+
+    const session = new JsonSessionStore(dataDir).listSessions()[0];
+    expect(session?.repositoryId).toBe(`${repo.dir}#${oldSha}`);
+
+    // Dirty the working tree WITHOUT committing. The recorded SHA must still be
+    // honoured on resume — analysing the modified working tree would silently
+    // read the wrong version.
+    writeFiles(repo.dir, { "a.txt": "uncommitted\n" });
+
+    const streams2 = capturedStreams();
+    const code2 = await runCli(["resume", session!.id], {
+      dataDir,
+      reader,
+      provider: crashingProvider(),
+      stdin: streams2.stdin,
+      stdout: streams2.stdout,
+      stderr: streams2.stderr,
+    });
+    expect(code2).toBe(1);
+
+    const resumedImport = reader.imports.at(-1);
+    expect(resumedImport?.input).toBe(repo.dir);
+    expect(resumedImport?.ref).toBe(oldSha);
+    // The resumed root holds the pinned content, not the dirty working tree.
+    expect(readFileSlice(resumedImport!.rootDir, "a.txt").content).toBe("old");
+    // No "working tree may have changed" warning: the session has a pinned SHA.
+    expect(streams2.stderrText()).not.toContain("本地路径内容可能已变化");
+  });
+
   it("does not pin a SHA for a subdirectory of a repo and warns on resume", async () => {
     const repo = await createTempRepo({ "sub/a.txt": "hello\n" });
     tempDirs.push(repo.dir);
