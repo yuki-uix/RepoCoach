@@ -261,4 +261,25 @@ describe("CLI assembly provider is lazy (P2)", () => {
     expect(streams.stderrText()).toContain("Could not read env file");
     expect(streams.stderrText()).toContain(envFilePath);
   });
+
+  it("start without an API key leaves no session file behind", async () => {
+    const dataDir = makeDataDir();
+    const envFilePath = join(dataDir, "does-not-exist.env.local");
+    const streams = capturedStreams();
+    streams.stdin.write("1\n");
+
+    const code = await runCli(["start", fixtureRoot], {
+      dataDir,
+      envFilePath,
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    streams.stdin.end();
+
+    expect(code).toBe(1);
+    expect(streams.stderrText()).toContain("Could not read env file");
+    // The provider failed before createSession, so no session file was written.
+    expect(new JsonSessionStore(dataDir).listSessions()).toHaveLength(0);
+  });
 });

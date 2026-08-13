@@ -8,7 +8,8 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdir, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { ParsedRepoUrl } from "./url.js";
 
@@ -84,8 +85,14 @@ export async function cloneRepo(
   const git = opts.git ?? runGit;
 
   if (source.kind === "local") {
-    // Local paths are used directly (fixtures / eval) — no clone, no cache.
+    // Local paths are used directly (fixtures / eval) — no clone, no cache —
+    // except when the path is itself a git repo root AND a ref was requested,
+    // in which case a resume wants to pin that ref, so we clone it (a local
+    // clone is cheap) and check it out.
     const sha = await headSha(source.path, git);
+    if (opts.ref !== undefined && sha !== "") {
+      return cloneLocalAtRef(source.path, opts.ref, opts.cacheRoot, git);
+    }
     return { rootDir: source.path, sha };
   }
 
@@ -167,6 +174,40 @@ function cloneBaseArgs(url: string, branch?: string): string[] {
   return args;
 }
 
+/**
+ * Pin a local git-repo root to a ref via a cheap local clone. A local clone
+ * shares objects with its source (hardlinks), so it is fast and carries the
+ * full history; checking out the SHA is therefore a plain detached `git
+ * checkout`, not the shallow fetch dance used for HTTP remotes.
+ */
+async function cloneLocalAtRef(
+  sourcePath: string,
+  ref: string,
+  cacheRoot: string,
+  git: GitRunner,
+): Promise<CloneResult> {
+  assertSafeRef(ref);
+  const sha = FULL_SHA_RE.test(ref)
+    ? ref.toLowerCase()
+    : (await git(["rev-parse", ref], sourcePath)).trim();
+  await mkdir(cacheRoot, { recursive: true });
+  // A distinct "local" owner segment keeps these checkouts out of the
+  // owner/name/sha namespace used for GitHub clones; the source path is hashed
+  // so the cache key never depends on (or leaks) an arbitrary local path.
+  const cacheDir = join(cacheRoot, "local", localKey(sourcePath), sha);
+  if (await isNonEmptyDir(cacheDir)) {
+    return { rootDir: cacheDir, sha };
+  }
+  await git(["clone", sourcePath, cacheDir]);
+  await git(["checkout", "--detach", sha], cacheDir);
+  return { rootDir: cacheDir, sha };
+}
+
+/** A stable, collision-resistant cache key for a local source path. */
+function localKey(sourcePath: string): string {
+  return createHash("sha1").update(sourcePath).digest("hex");
+}
+
 async function isNonEmptyDir(dir: string): Promise<boolean> {
   try {
     const entries = await readdir(dir);
@@ -176,9 +217,19 @@ async function isNonEmptyDir(dir: string): Promise<boolean> {
   }
 }
 
-/** Resolve the checked-out commit SHA, or "" when the path is not a git repo. */
+/**
+ * Resolve the checked-out commit SHA, or "" when the path is not itself a git
+ * repo root. A subdirectory of a repo (or a non-git path) has no stable pin:
+ * `git rev-parse --show-toplevel` resolves above it, so only a path that IS
+ * the toplevel gets a SHA — everything else reports "" to stay honest about
+ * what a resume can pin.
+ */
 async function headSha(rootDir: string, git: GitRunner): Promise<string> {
   try {
+    const topLevel = (await git(["rev-parse", "--show-toplevel"], rootDir)).trim();
+    if ((await realpath(topLevel)) !== (await realpath(rootDir))) {
+      return "";
+    }
     return (await git(["rev-parse", "HEAD"], rootDir)).trim();
   } catch {
     return "";

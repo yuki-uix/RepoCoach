@@ -103,6 +103,10 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
   const prompt = makePrompt(asm.stdin, asm.stdout);
   try {
     const repo = await asm.reader.importRepository(input);
+    // Resolve the provider (accessing the lazy getter) up front so a missing
+    // API key fails the start before any session file is written — a failed
+    // start must never leave an empty active session behind.
+    void asm.provider;
     const candidates = asm.candidateProvider.listCandidates(repo);
     const candidate = await selectCandidate(candidates, prompt.question, asm.stdout);
     const session = asm.store.createSession({
@@ -125,10 +129,16 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
     const { input, sha } = splitRepositoryId(resumed.session.repositoryId);
     const repo = await asm.reader.importRepository(input, sha);
     if (sha === undefined) {
-      asm.stderr.write(
-        `Warning: session ${resumed.sessionId} has no pinned commit SHA; ` +
-          `resuming against the current repository state (content may have changed).\n`,
-      );
+      if (repo.source.kind === "local") {
+        asm.stderr.write(
+          "Warning: 本地路径内容可能已变化，分析基于当前工作树。\n",
+        );
+      } else {
+        asm.stderr.write(
+          `Warning: session ${resumed.sessionId} has no pinned commit SHA; ` +
+            `resuming against the current repository state (content may have changed).\n`,
+        );
+      }
     }
     const candidates = asm.candidateProvider.listCandidates(repo);
     const goal = resolveFeatureGoal(candidates, resumed.session.featureId);
@@ -272,9 +282,11 @@ const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * Persist the repository id together with the commit the session was started
- * at, as `url#sha`. Local checkouts also record their HEAD SHA so a resumed
- * session knows exactly what it analysed; a non-git path has no SHA and stays
- * a bare path (backward compatible — a legacy id without `#` carries none).
+ * at, as `url#sha`. A local path records its HEAD SHA only when it is itself a
+ * git repo root (so a resume can pin that exact commit); a subdirectory of a
+ * repo or a non-git path has no SHA (`headSha` returns "") and stays a bare
+ * path, so a resume honestly analyses the current working tree. A legacy id
+ * without `#` carries none either.
  */
 export function repositoryIdWithSha(repo: Repository): string {
   const base = repositoryIdFromRepo(repo);
