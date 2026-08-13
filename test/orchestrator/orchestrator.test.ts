@@ -149,6 +149,38 @@ describe("Orchestrator", () => {
     expect(result.turn?.skipped).toBe(true);
   });
 
+  it("forwards an explicit skip to the agent", async () => {
+    const store = new InMemorySessionStore();
+    const { agent, calls } = stubAgent((input) => {
+      if (input.phase === "orientation") {
+        return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+      }
+      return { decision: decision({ question: "predict", nextAction: "ask" }), usage: USAGE };
+    });
+    const { orchestrator } = makeOrchestrator(agent, store);
+
+    await orchestrator.step(); // orientation → hypothesis
+    await orchestrator.skip(); // hypothesis, skipped
+
+    expect(calls.find((c) => c.phase === "hypothesis")?.skipped).toBe(true);
+  });
+
+  it("does not set skipped on a normal answer", async () => {
+    const store = new InMemorySessionStore();
+    const { agent, calls } = stubAgent((input) => {
+      if (input.phase === "orientation") {
+        return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+      }
+      return { decision: decision({ question: "predict", nextAction: "ask" }), usage: USAGE };
+    });
+    const { orchestrator } = makeOrchestrator(agent, store);
+
+    await orchestrator.step(); // orientation → hypothesis
+    await orchestrator.step("parse()"); // hypothesis, answered → trace
+
+    expect(calls.find((c) => c.phase === "hypothesis")?.skipped).toBeUndefined();
+  });
+
   it("forces recap once the turn limit is reached", async () => {
     const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
@@ -166,7 +198,10 @@ describe("Orchestrator", () => {
           return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
         case "feedback":
           // Always wants to probe deeper.
-          return { decision: decision({ assessment: "correct", nextAction: "ask" }), usage: USAGE };
+          return {
+            decision: decision({ assessment: "correct", question: "probe deeper?", nextAction: "ask" }),
+            usage: USAGE,
+          };
         default:
           throw new Error(`unexpected phase ${input.phase}`);
       }
@@ -229,6 +264,7 @@ describe("Orchestrator", () => {
     expect(result.phase).toBe("error");
     expect(result.decision).toBeNull();
     expect(store.getSession(sessionId)?.phase).toBe("error");
+    expect(store.getSession(sessionId)?.status).toBe("abandoned");
   });
 
   it("forces recap when the token budget is exceeded", async () => {

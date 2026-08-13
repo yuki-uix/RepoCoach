@@ -100,15 +100,32 @@ export type LearningTurn = z.infer<typeof learningTurnSchema>;
 
 /**
  * The structured decision the model must produce. Deliberately has no `phase`
- * field — the phase is Orchestrator context, never model output.
+ * field — the phase is Orchestrator context, never model output. `.strict()`
+ * rejects any unknown field (e.g. a model that overreaches and emits `phase`).
  */
-export const agentDecisionSchema = z.object({
-  question: z.string().optional(),
-  evidence: z.array(evidenceSchema),
-  assessment: assessmentSchema.optional(),
-  feedback: z.string().optional(),
-  nextAction: nextActionSchema,
-});
+export const agentDecisionSchema = z
+  .object({
+    question: z.string().optional(),
+    evidence: z.array(evidenceSchema),
+    assessment: assessmentSchema.optional(),
+    feedback: z.string().optional(),
+    nextAction: nextActionSchema,
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    // "ask" without a real question is not a valid decision: the model must
+    // supply a non-empty question for the Orchestrator to pose.
+    if (
+      decision.nextAction === "ask" &&
+      (decision.question === undefined || decision.question.trim() === "")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["question"],
+        message: "question must be a non-empty string when nextAction is 'ask'",
+      });
+    }
+  });
 export type AgentDecision = z.infer<typeof agentDecisionSchema>;
 
 export const tokenUsageSchema = z.object({

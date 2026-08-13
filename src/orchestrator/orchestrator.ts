@@ -26,6 +26,8 @@ export interface AgentInvokerInput {
   featureGoal: string;
   turnHistory: LearningTurn[];
   userAnswer?: string;
+  /** True when the user skipped the question instead of answering. */
+  skipped?: boolean;
 }
 
 /** The agent's structured decision plus the token usage for the call. */
@@ -121,10 +123,13 @@ export class Orchestrator {
       );
     }
 
-    const invocation = await this.invokeWithRetry(phase, session, input.userAnswer);
+    const invocation = await this.invokeWithRetry(phase, session, input);
     if (invocation === null) {
       // The agent never produced a schema-valid decision. Give up.
-      this.store.updateSession(this.sessionId, { phase: "error" });
+      this.store.updateSession(this.sessionId, {
+        phase: "error",
+        status: "abandoned",
+      });
       return {
         phase: "error",
         decision: null,
@@ -161,7 +166,7 @@ export class Orchestrator {
     this.store.updateSession(this.sessionId, {
       phase: nextPhase,
       turnCount,
-      status: nextPhase === "recap" ? "completed" : session.status,
+      status: terminalStatus(nextPhase) ?? session.status,
     });
 
     return {
@@ -190,14 +195,15 @@ export class Orchestrator {
   private async invokeWithRetry(
     phase: Phase,
     session: LearningSession,
-    userAnswer: string | undefined,
+    input: RunInput,
   ): Promise<{ decision: AgentDecision } | null> {
     for (let attempt = 0; attempt <= MAX_DECISION_RETRIES; attempt++) {
       const result = await this.agent({
         phase,
         featureGoal: this.featureGoal,
         turnHistory: this.store.listTurns(session.id),
-        userAnswer,
+        userAnswer: input.userAnswer,
+        skipped: input.skip,
       });
       this.usage.inputTokens += result.usage.inputTokens;
       this.usage.outputTokens += result.usage.outputTokens;
@@ -256,18 +262,22 @@ function resolveStep(
       return { phase, askedQuestion: true, overridden: nextAction !== "ask" };
     }
 
-    case "trace":
+    case "trace": {
       if (nextAction !== "show_evidence") {
         return stayOverridden(phase);
       }
       // "unknown" assessment is how an evidence-less trace reports uncertainty
-      // (docs/mvp-spec.md §8); it maps to the insufficient-evidence edge.
+      // (docs/mvp-spec.md §8); it maps to the insufficient-evidence edge. An
+      // empty evidence array is equally inconclusive — no evidence to stand on.
+      const evidenceInsufficient =
+        decision.assessment === "unknown" || decision.evidence.length === 0;
       return advance(
         phase,
-        decision.assessment === "unknown"
+        evidenceInsufficient
           ? { type: "evidence_insufficient" }
           : { type: "evidence_sufficient" },
       );
+    }
 
     case "questioning": {
       // The user's answer completes this turn and moves to feedback — even
@@ -316,4 +326,15 @@ function advance(phase: Phase, event: OrchestratorEvent): ResolveResult {
 
 function stayOverridden(phase: Phase): ResolveResult {
   return { phase, askedQuestion: false, overridden: true };
+}
+
+/**
+ * The session `status` a terminal phase implies: `recap` means the session was
+ * completed, `error` means it was abandoned. Non-terminal phases keep the
+ * current status.
+ */
+function terminalStatus(phase: Phase): "completed" | "abandoned" | undefined {
+  if (phase === "recap") return "completed";
+  if (phase === "error") return "abandoned";
+  return undefined;
 }
