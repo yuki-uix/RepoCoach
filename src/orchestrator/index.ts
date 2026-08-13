@@ -1,8 +1,26 @@
 /**
- * Learning Orchestrator
+ * Learning Orchestrator — public entry point.
  *
- * Holds the learning state machine, round limits and token budget, and drives
- * the Agent loop. See docs/architecture.md §3 for the module boundary. Not yet
- * implemented — this is a module-boundary placeholder.
+ * Composes the pure state machine and the Orchestrator class. See
+ * docs/architecture.md §3–§4.
  */
-export {};
+
+export {
+  ALL_EVENTS,
+  InvalidTransitionError,
+  transition,
+  VALID_TRANSITIONS,
+} from "./state-machine.js";
+export { Orchestrator } from "./orchestrator.js";
+
+export type {
+  OrchestratorEvent,
+  OrchestratorEventType,
+} from "./state-machine.js";
+export type {
+  AgentInvocation,
+  AgentInvoker,
+  AgentInvokerInput,
+  OrchestratorOptions,
+  StepResult,
+} from "./orchestrator.js";
