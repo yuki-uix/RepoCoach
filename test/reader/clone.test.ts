@@ -73,4 +73,54 @@ describe("cloneRepo", () => {
     expect(rootDir).toBe(repo.dir);
     expect(sha).toBe(repo.sha);
   });
+
+  it("rejects a ref that looks like a git option before invoking git", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+    const calls: string[][] = [];
+    const git: GitRunner = async (args) => {
+      calls.push(args);
+      return "";
+    };
+
+    await expect(
+      cloneRepo(GITHUB_SOURCE, {
+        cacheRoot,
+        ref: "--upload-pack=touch /tmp/pwned",
+        git,
+      }),
+    ).rejects.toThrow("--upload-pack=touch /tmp/pwned");
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects leading dashes and path traversal", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    for (const ref of ["-evil", "a..b"]) {
+      await expect(
+        cloneRepo(GITHUB_SOURCE, { cacheRoot, ref }),
+      ).rejects.toThrow(ref);
+    }
+  });
+
+  it("accepts normal branch, tag, and SHA refs", async () => {
+    const repo = await createTempRepo({ "a.txt": "hello\n" });
+    tempDirs.push(repo.dir);
+    await runGit(["update-ref", "refs/heads/main", repo.sha], repo.dir);
+    await runGit(["update-ref", "refs/heads/feature/foo", repo.sha], repo.dir);
+    await runGit(["tag", "v1.2.3", repo.sha], repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    for (const ref of ["main", "v1.2.3", "feature/foo", repo.sha]) {
+      const { sha } = await cloneRepo(GITHUB_SOURCE, {
+        cacheRoot,
+        url: repo.dir,
+        ref,
+      });
+      expect(sha).toBe(repo.sha);
+    }
+  });
 });

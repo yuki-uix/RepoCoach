@@ -14,7 +14,31 @@ import type { ParsedRepoUrl } from "./url.js";
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 
+/** Characters permitted in a git refname (see docs/architecture.md §6). */
+const SAFE_REF_RE = /^[A-Za-z0-9._/-]+$/;
+
 export type GitRunner = (args: string[], cwd?: string) => Promise<string>;
+
+/**
+ * Reject refs that `git` could parse as options or that fall outside the safe
+ * refname character set. This closes the argument-injection hole where a ref
+ * beginning with `-` (e.g. `--upload-pack=<cmd>`) would be treated by
+ * `git ls-remote` as an option rather than a pattern.
+ */
+function assertSafeRef(ref: string): void {
+  if (
+    ref.startsWith("-") ||
+    ref.includes("..") ||
+    ref.startsWith("/") ||
+    ref.endsWith("/") ||
+    !SAFE_REF_RE.test(ref)
+  ) {
+    throw new Error(
+      `Unsafe ref "${ref}": refs must not start with "-", contain "..", ` +
+        `or start/end with "/", and may only contain [A-Za-z0-9._/-]`,
+    );
+  }
+}
 
 /**
  * Run `git` with a fixed argv array (never `shell: true`). Returns stdout.
@@ -67,6 +91,9 @@ export async function cloneRepo(
 
   const url = opts.url ?? `https://github.com/${source.owner}/${source.name}.git`;
   const ref = opts.ref ?? source.ref;
+  if (ref !== undefined) {
+    assertSafeRef(ref);
+  }
   const resolvedSha = await resolveRef(url, ref, git);
 
   await mkdir(opts.cacheRoot, { recursive: true });
