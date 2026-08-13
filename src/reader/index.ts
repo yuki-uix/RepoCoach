@@ -109,7 +109,7 @@ export function createReader(options: ReaderOptions): Reader {
     },
 
     getPackageInfo(repo) {
-      return getPackageInfo(repo.rootDir);
+      return getPackageInfo(repo.rootDir, { maxFileSize });
     },
   };
 }
