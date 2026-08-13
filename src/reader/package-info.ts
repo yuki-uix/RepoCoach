@@ -4,10 +4,20 @@
  * Parses the root `package.json` and returns only names/keys — scripts are
  * never executed, dependencies are never installed. Also resolves the
  * `workspaces` field for monorepo support.
+ *
+ * The read goes through the dual gate (§6): `resolveInRepo` (path containment
+ * + realpath) and the readable-path + size filters applied to both the alias
+ * and the symlink's real target. Workspaces are only parsed as the strings
+ * named in `package.json`; no sub-`package.json` is ever read here.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import {
+  isReadablePath,
+  isWithinSizeLimit,
+  type FileFilterOptions,
+} from "./filters.js";
+import { resolveInRepo } from "./fs-guard.js";
 
 export interface PackageInfo {
   name?: string;
@@ -19,8 +29,25 @@ export interface PackageInfo {
   workspaces: string[];
 }
 
-export function getPackageInfo(rootDir: string): PackageInfo {
-  const raw = readFileSync(join(rootDir, "package.json"), "utf8");
+export function getPackageInfo(
+  rootDir: string,
+  opts?: FileFilterOptions,
+): PackageInfo {
+  const relPath = "package.json";
+  const { resolved, realRel } = resolveInRepo(rootDir, relPath);
+  const size = statSync(resolved).size;
+
+  // Filters gate: run the readable-path check on both the requested path and
+  // the symlink's real target, so `package.json -> .env` is refused even though
+  // the alias itself looks readable. Size is checked separately on the target.
+  if (!isReadablePath(relPath) || !isReadablePath(realRel)) {
+    throw new Error(`File is not readable: ${relPath}`);
+  }
+  if (!isWithinSizeLimit(size, opts?.maxFileSize)) {
+    throw new Error(`File exceeds size limit: ${relPath}`);
+  }
+
+  const raw = readFileSync(resolved, "utf8");
   let pkg: Record<string, unknown>;
   try {
     pkg = JSON.parse(raw) as Record<string, unknown>;

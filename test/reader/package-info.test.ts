@@ -1,4 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,5 +62,56 @@ describe("getPackageInfo", () => {
   it("throws on invalid JSON", () => {
     const root = makeRoot({ "package.json": "{ not json" });
     expect(() => getPackageInfo(root)).toThrow(/not valid JSON/);
+  });
+
+  it("rejects a package.json symlink pointing outside the repo", () => {
+    const root = makeRoot({});
+    const outside = mkdtempSync(join(tmpdir(), "repocoach-pkg-outside-"));
+    tempDirs.push(outside);
+    const target = join(outside, "secret.json");
+    writeFileSync(target, JSON.stringify({ name: "top-secret" }));
+    symlinkSync(target, join(root, "package.json"));
+
+    let message = "";
+    try {
+      getPackageInfo(root);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/escapes repository root/);
+    expect(message).not.toContain("top-secret");
+  });
+
+  it("rejects a package.json symlink whose real target is a secret file", () => {
+    const root = makeRoot({ ".env": "SECRET=1\n" });
+    symlinkSync(join(root, ".env"), join(root, "package.json"));
+
+    let message = "";
+    try {
+      getPackageInfo(root);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/not readable/);
+    expect(message).not.toContain(".env");
+  });
+
+  it("rejects an oversized package.json (over 512 KiB)", () => {
+    const big = JSON.stringify({
+      name: "big",
+      scripts: { build: "x".repeat(512 * 1024) },
+    });
+    const root = makeRoot({ "package.json": big });
+    expect(() => getPackageInfo(root)).toThrow(/size limit/);
+  });
+
+  it("reads a package.json symlink whose real target is readable JSON", () => {
+    const root = makeRoot({
+      "real.json": JSON.stringify({ name: "linked", scripts: { start: "node" } }),
+    });
+    symlinkSync(join(root, "real.json"), join(root, "package.json"));
+    const info = getPackageInfo(root);
+    expect(info.name).toBe("linked");
+    expect(info.scripts).toEqual(["start"]);
   });
 });

@@ -42,4 +42,20 @@ describe("createReader", () => {
     );
     expect(reader.getPackageInfo(imported).name).toBe("demo");
   });
+
+  it("enforces reader maxFileSize on package-info reads", async () => {
+    const big = JSON.stringify({
+      name: "big",
+      scripts: { build: "x".repeat(2048) },
+    });
+    const repo = await createTempRepo({ "package.json": big });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const reader = createReader({ cacheRoot, maxFileSize: 1024 });
+    const imported = await reader.importRepository(repo.dir);
+
+    expect(() => reader.getPackageInfo(imported)).toThrow(/size limit/);
+  });
 });
