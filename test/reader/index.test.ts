@@ -1,0 +1,45 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createReader } from "../../src/reader";
+import { cleanupDir, createTempRepo } from "./helpers";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    cleanupDir(dir);
+  }
+});
+
+describe("createReader", () => {
+  it("imports a local repo and exposes tree/search/read/package-info", async () => {
+    const repo = await createTempRepo({
+      "package.json": JSON.stringify({
+        name: "demo",
+        scripts: { test: "vitest" },
+      }),
+      "src/app.ts": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+    });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const reader = createReader({ cacheRoot });
+    const imported = await reader.importRepository(repo.dir);
+
+    expect(imported.rootDir).toBe(repo.dir);
+    expect(imported.sha).toBe(repo.sha);
+    expect(imported.meta).toBeNull();
+
+    expect(reader.getTree(imported).map((e) => e.path)).toContain("src/app.ts");
+    expect((await reader.search(imported, "return")).map((m) => m.line)).toEqual([
+      2,
+    ]);
+    expect(reader.readFile(imported, "src/app.ts", 2, 2).content).toContain(
+      "return",
+    );
+    expect(reader.getPackageInfo(imported).name).toBe("demo");
+  });
+});
