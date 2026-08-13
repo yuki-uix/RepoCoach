@@ -191,7 +191,7 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 因此规定：**Reader 中任何新的文件访问路径（读取、搜索、遍历、未来的任何形态）必须同时通过两道闸，缺一不可**：
 
 1. **fs-guard 闸**：路径解析（含 realpath）后必须落在仓库根内；
-2. **filters 闸**：对请求路径**和** realpath 真实目标路径都执行同一套 `isReadablePath` 判定（扩展名白名单、路径黑名单、大小上限、密钥文件名）。
+2. **filters 闸**：对请求路径**和** realpath 真实目标路径都执行同一套 `isReadablePath` 判定（扩展名白名单、路径黑名单、密钥文件名）；**大小上限不在 `isReadablePath` 内**——它依赖 stat / rg 的 `--max-filesize`，必须由每个访问路径显式执行（read-file 用 `isWithinSizeLimit`，search 用 `--max-filesize` 参数）。新增访问路径时这是最容易漏的一项，负向测试必须包含超大文件。
 
 配套要求：
 
