@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -49,5 +49,14 @@ describe("getTree", () => {
     });
     const tree = getTree(root, { maxFileSize: 10 });
     expect(tree.map((e) => e.path)).toEqual(["src/app.ts"]);
+  });
+
+  it("does not surface a symlink whose alias name looks readable", () => {
+    const root = makeRoot({
+      "real.ts": "export const x = 1;\n",
+      ".env": "SECRET=1\n",
+    });
+    symlinkSync(join(root, ".env"), join(root, "config.ts"));
+    expect(getTree(root).map((e) => e.path)).toEqual(["real.ts"]);
   });
 });

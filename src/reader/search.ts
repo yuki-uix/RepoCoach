@@ -6,6 +6,11 @@
  * function shim, not a real binary. Invoked with `execFile` (fixed argv, no
  * `shell: true`), JSON output mode (`--json`) so results carry exact line and
  * column numbers.
+ *
+ * Symlinks: ripgrep does not follow symlinks by default, and we deliberately
+ * pass no `--follow` flag, so a link like `config.ts -> .env` is never
+ * searched under its alias path. Do not add `--follow` without re-applying the
+ * real-target filters from fs-guard to every match.
  */
 
 import { execFile } from "node:child_process";

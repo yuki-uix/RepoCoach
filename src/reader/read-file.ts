@@ -32,13 +32,17 @@ export function readFileSlice(
   endLine?: number,
   opts?: FileFilterOptions,
 ): FileSlice {
-  const resolved = resolveInRepo(rootDir, relPath);
+  const { resolved, realRel } = resolveInRepo(rootDir, relPath);
   const size = statSync(resolved).size;
 
-  if (isPathExcluded(relPath)) {
+  // Apply the path filters to both the user-supplied alias and the symlink's
+  // real target, so a link like `config.ts -> .env` is refused even though the
+  // alias path itself looks readable. Error messages use the user's relPath,
+  // never the real target (which could leak a secret filename).
+  if (isPathExcluded(relPath) || isPathExcluded(realRel)) {
     throw new Error(`File is excluded from reads: ${relPath}`);
   }
-  if (!hasTextExtension(relPath)) {
+  if (!hasTextExtension(relPath) || !hasTextExtension(realRel)) {
     throw new Error(`File has no text extension: ${relPath}`);
   }
   if (!isWithinSizeLimit(size, opts?.maxFileSize)) {

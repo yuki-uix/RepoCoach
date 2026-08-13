@@ -22,7 +22,10 @@ describe("resolveInRepo", () => {
   it("resolves a normal relative path inside the repo", () => {
     const root = makeRepo();
     writeFileSync(join(root, "a.txt"), "x");
-    expect(resolveInRepo(root, "a.txt")).toBe(join(root, "a.txt"));
+    expect(resolveInRepo(root, "a.txt")).toEqual({
+      resolved: join(root, "a.txt"),
+      realRel: "a.txt",
+    });
   });
 
   it("rejects a ../ traversal outside the repo", () => {
@@ -54,7 +57,10 @@ describe("resolveInRepo", () => {
     const root = makeRepo();
     writeFileSync(join(root, "real.txt"), "hello");
     symlinkSync(join(root, "real.txt"), join(root, "alias.txt"));
-    expect(resolveInRepo(root, "alias.txt")).toBe(join(root, "alias.txt"));
+    expect(resolveInRepo(root, "alias.txt")).toEqual({
+      resolved: join(root, "alias.txt"),
+      realRel: "real.txt",
+    });
   });
 
   it("rejects a missing file", () => {

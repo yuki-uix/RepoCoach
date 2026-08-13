@@ -2,8 +2,11 @@
  * Directory tree walk.
  *
  * Recursively lists readable text files under `rootDir` (after the filters in
- * filters.ts). Symlinks are never followed, so a link pointing outside the
- * repository cannot escape the walk.
+ * filters.ts). Symlinks are never followed or returned, so a link cannot
+ * escape the walk or masquerade as a readable file — even one whose alias name
+ * passes the filters (`config.ts -> .env`) is simply skipped. See read-file.ts,
+ * which does follow in-repo symlinks and therefore re-runs the filters against
+ * the real target via fs-guard's `realRel`.
  */
 
 import { readdirSync, statSync } from "node:fs";

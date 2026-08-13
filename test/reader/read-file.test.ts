@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -67,5 +67,31 @@ describe("readFileSlice", () => {
   it("rejects path traversal", () => {
     const root = makeRoot({ "a.txt": "x" });
     expect(() => readFileSlice(root, "../a.txt")).toThrow(/escapes/);
+  });
+
+  it("rejects a symlink whose real target is a secret file", () => {
+    const root = makeRoot({ ".env": "SECRET=1\n" });
+    symlinkSync(join(root, ".env"), join(root, "config.ts"));
+    let message = "";
+    try {
+      readFileSlice(root, "config.ts");
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/excluded/);
+    expect(message).not.toContain(".env");
+  });
+
+  it("rejects a symlink whose real target has no text extension", () => {
+    const root = makeRoot({});
+    writeFileSync(join(root, "data.bin"), "not text");
+    symlinkSync(join(root, "data.bin"), join(root, "notes.md"));
+    expect(() => readFileSlice(root, "notes.md")).toThrow(/no text extension/);
+  });
+
+  it("reads a symlink whose real target is readable", () => {
+    const root = makeRoot({ "b.ts": "const b = 1;\n" });
+    symlinkSync(join(root, "b.ts"), join(root, "a.ts"));
+    expect(readFileSlice(root, "a.ts").content).toBe("const b = 1;");
   });
 });
