@@ -97,16 +97,22 @@ export function isBinaryContent(buf: Uint8Array): boolean {
   return false;
 }
 
+/**
+ * Path-level visibility check shared by tree traversal, search, and file
+ * reads: not on the blacklist and has a text extension. Size and binary
+ * content are checked separately (they need the file's bytes/size).
+ */
+export function isReadablePath(relPath: string): boolean {
+  return !isPathExcluded(relPath) && hasTextExtension(relPath);
+}
+
 /** Full inclusion check for tree traversal (path + extension + size). */
 export function isIncludedInTree(
   relPath: string,
   size: number,
   opts?: FileFilterOptions,
 ): boolean {
-  if (isPathExcluded(relPath)) {
-    return false;
-  }
-  if (!hasTextExtension(relPath)) {
+  if (!isReadablePath(relPath)) {
     return false;
   }
   return isWithinSizeLimit(size, opts?.maxFileSize);

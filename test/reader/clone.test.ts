@@ -60,6 +60,22 @@ describe("cloneRepo", () => {
     expect(calls.filter((a) => a[0] === "clone")).toHaveLength(1);
   });
 
+  it("lays out the cache as owner/name/sha to avoid concatenation collisions", async () => {
+    const repo = await createTempRepo({ "a.txt": "hello\n" });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(GITHUB_SOURCE, {
+      cacheRoot,
+      url: repo.dir,
+      ref: repo.sha,
+    });
+
+    expect(sha).toBe(repo.sha);
+    expect(rootDir).toBe(join(cacheRoot, "o", "n", sha));
+  });
+
   it("uses a local path directly without cloning", async () => {
     const repo = await createTempRepo({ "a.txt": "hello\n" });
     tempDirs.push(repo.dir);

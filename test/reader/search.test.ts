@@ -59,6 +59,22 @@ describe("searchRepo", () => {
     expect(results.map((r) => r.path)).toEqual(["src/app.ts"]);
   });
 
+  it("does not return matches from files over the size limit", async () => {
+    const big = "return 1;\n" + "x".repeat(512 * 1024);
+    const root = makeRoot({ "big.ts": big });
+    const results = await searchRepo(root, "return");
+    expect(results).toEqual([]);
+  });
+
+  it("does not return matches from non-whitelist extensions", async () => {
+    const root = makeRoot({
+      "src/app.ts": "return 1;\n",
+      "data/blob.bin": "return 2;\n",
+    });
+    const results = await searchRepo(root, "return");
+    expect(results.map((r) => r.path)).toEqual(["src/app.ts"]);
+  });
+
   it("returns no matches for an absent pattern", async () => {
     const root = makeRoot({ "src/app.ts": APP_TS });
     const results = await searchRepo(root, "no-such-token-xyz");

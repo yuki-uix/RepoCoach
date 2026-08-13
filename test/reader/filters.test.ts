@@ -4,6 +4,7 @@ import {
   isBinaryContent,
   isIncludedInTree,
   isPathExcluded,
+  isReadablePath,
   isWithinSizeLimit,
 } from "../../src/reader/filters";
 
@@ -82,5 +83,14 @@ describe("isIncludedInTree", () => {
     expect(isIncludedInTree("node_modules/x.ts", 100)).toBe(false);
     expect(isIncludedInTree("image.png", 100)).toBe(false);
     expect(isIncludedInTree("big.ts", 999999)).toBe(false);
+  });
+});
+
+describe("isReadablePath", () => {
+  it("applies the path and extension checks without a size check", () => {
+    expect(isReadablePath("src/app.ts")).toBe(true);
+    expect(isReadablePath("node_modules/x.ts")).toBe(false);
+    expect(isReadablePath("image.png")).toBe(false);
+    expect(isReadablePath("server.pem")).toBe(false);
   });
 });

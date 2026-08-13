@@ -58,7 +58,7 @@ export function parseRepoUrl(input: string): ParsedRepoUrl {
       throw new Error(`Invalid GitHub repository URL: ${raw}`);
     }
     const owner = match[1];
-    const name = match[2];
+    const name = stripGitSuffix(match[2]);
     const ref = match[3] || undefined;
     assertValidOwnerName(owner, name, raw);
     return ref === undefined
@@ -70,7 +70,7 @@ export function parseRepoUrl(input: string): ParsedRepoUrl {
   const shorthand = raw.match(/^([^/\s]+)\/([^/\s]+)$/);
   if (shorthand) {
     const owner = shorthand[1];
-    const name = shorthand[2];
+    const name = stripGitSuffix(shorthand[2]);
     assertValidOwnerName(owner, name, raw);
     return { kind: "github", owner, name };
   }
@@ -90,6 +90,14 @@ function parseFileUrl(raw: string): string {
     throw new Error(`Expected a file:// URL, got: ${raw}`);
   }
   return fileURLToPath(url);
+}
+
+/**
+ * Strip a single trailing `.git` suffix (the conventional clone-URL spelling).
+ * `repo.github.io` and other names ending in `.io`/`.org` are left untouched.
+ */
+function stripGitSuffix(name: string): string {
+  return name.endsWith(".git") ? name.slice(0, -".git".length) : name;
 }
 
 function assertValidOwnerName(owner: string, name: string, raw: string): void {

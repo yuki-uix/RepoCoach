@@ -98,6 +98,7 @@ export function createReader(options: ReaderOptions): Reader {
     search(repo, pattern, opts) {
       return runSearch(repo.rootDir, pattern, {
         contextLines: opts?.contextLines ?? contextLines,
+        maxFileSize,
       });
     },
 

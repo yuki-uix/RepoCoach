@@ -52,6 +52,27 @@ describe("parseRepoUrl", () => {
     });
   });
 
+  it("strips a trailing .git suffix from the repository name", () => {
+    expect(parseRepoUrl("owner/repo.git")).toEqual({
+      kind: "github",
+      owner: "owner",
+      name: "repo",
+    });
+    expect(parseRepoUrl("https://github.com/owner/repo.git")).toEqual({
+      kind: "github",
+      owner: "owner",
+      name: "repo",
+    });
+  });
+
+  it("does not strip a .git-like suffix from names like repo.github.io", () => {
+    expect(parseRepoUrl("owner/repo.github.io")).toEqual({
+      kind: "github",
+      owner: "owner",
+      name: "repo.github.io",
+    });
+  });
+
   it("parses a file:// URL into a local path", () => {
     expect(parseRepoUrl("file:///tmp/some-repo").kind).toBe("local");
   });

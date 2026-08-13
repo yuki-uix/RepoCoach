@@ -12,12 +12,15 @@ import { execFile } from "node:child_process";
 import { relative, resolve, sep } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 import {
+  DEFAULT_MAX_FILE_SIZE,
   EXCLUDED_DIR_NAMES,
-  isPathExcluded,
+  isReadablePath,
 } from "./filters.js";
 
 export interface SearchOptions {
   contextLines?: number;
+  /** Files larger than this (bytes) are never searched. Defaults to 512 KiB. */
+  maxFileSize?: number;
 }
 
 export interface SearchMatch {
@@ -47,12 +50,15 @@ export async function searchRepo(
   opts: SearchOptions = {},
 ): Promise<SearchMatch[]> {
   const contextLines = opts.contextLines ?? 2;
+  const maxFileSize = opts.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
   const args = [
     "--json",
     "-B",
     String(contextLines),
     "-A",
     String(contextLines),
+    "--max-filesize",
+    String(maxFileSize),
     ...EXCLUDED_DIR_NAMES.map((dir) => `--glob=!**/${dir}/**`),
     "--",
     pattern,
@@ -64,7 +70,9 @@ export async function searchRepo(
   const results: SearchMatch[] = [];
   for (const match of parseJson(stdout, contextLines)) {
     const rel = relative(root, match.path).split(sep).join("/");
-    if (isPathExcluded(rel)) {
+    // Same path/extension judgment as tree and read-file, so search never
+    // surfaces a file those entry points would refuse (e.g. `.bin`).
+    if (!isReadablePath(rel)) {
       continue;
     }
     results.push({ ...match, path: rel });

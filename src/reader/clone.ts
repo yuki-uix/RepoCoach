@@ -97,10 +97,9 @@ export async function cloneRepo(
   const resolvedSha = await resolveRef(url, ref, git);
 
   await mkdir(opts.cacheRoot, { recursive: true });
-  const cacheDir = join(
-    opts.cacheRoot,
-    `${source.owner}-${source.name}-${resolvedSha}`,
-  );
+  // Layered owner/name/sha so no pair of (owner, name) values can collide by
+  // string concatenation (e.g. "foo-bar"/"baz" vs "foo"/"bar-baz").
+  const cacheDir = join(opts.cacheRoot, source.owner, source.name, resolvedSha);
 
   if (await isNonEmptyDir(cacheDir)) {
     return { rootDir: cacheDir, sha: resolvedSha };
