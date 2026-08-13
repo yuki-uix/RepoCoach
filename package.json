@@ -8,8 +8,12 @@
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
+  "bin": {
+    "repocoach": "dist/cli/bin.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p fixtures/fixture-repo/tsconfig.json --noEmit",
+    "start": "node dist/cli/bin.js",
     "test": "vitest run",
     "lint": "eslint src test"
   },
