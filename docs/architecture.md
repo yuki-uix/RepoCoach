@@ -199,7 +199,15 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 - 一切进入子进程 argv 的用户输入（ref、pattern、路径）必须经过白名单校验或 `--` 分隔符隔离，禁止以裸值传入；
 - 新增访问路径的 PR 必须附带符号链接别名与越界路径的负向测试。
 
-## 7. 评估策略
+### 同一道闸覆盖所有出口
+
+双闸规则的推论，单独成条是因为已经两次踩中同一模式（search 绕过 filters、submit_decision 绕过证据接地）：**校验的单位是"数据离开信任边界的语义"，不是某一个函数调用点**。凡是同一类数据有多条离开路径，每条路径必须过同一道闸：
+
+- 证据引用有两个出口——`repo_save_evidence` 工具与 `submit_decision.evidence` 字段——两者都必须过 `EvidenceValidator`，且 **grounding validator 在生产组装入口是强制注入项**：`acceptAllEvidence` 仅供单测使用，CLI/API 组装时不注入接地校验即为缺陷；
+- 文件内容有四个出口——read-file、search、tree、**package-info**——四者都必须过 fs-guard 与统一的 filters 谓词（package-info 曾以 `readFileSync` 裸读 `package.json`，符号链接可越界，正是本条规则要抓的形态）；
+- 新增任何"模型输出进入产品状态"的路径（未来的 recap 生成、UI 展示等）时，先问：这类数据已有的闸在哪，新路径过了吗。
+
+Review checklist：改动引入新的输出/保存路径时，diff 里必须能指出它复用的闸；指不出即打回。
 
 ### Fixture eval
 
