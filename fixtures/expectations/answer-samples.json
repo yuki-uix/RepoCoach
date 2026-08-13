@@ -1,0 +1,56 @@
+[
+  {
+    "question": "When a task is added via createTracker(), which modules does the data flow through, in order?",
+    "userAnswer": "parseTask parses it, validate checks it, store.add saves it into memory, and formatTask renders it.",
+    "expectedAssessment": "correct",
+    "rationale": "States the full parse -> validate -> store -> render chain in the correct order."
+  },
+  {
+    "question": "Where does taskloom store its tasks?",
+    "userAnswer": "In memory, inside a MemoryStore that keeps an array and assigns each task an id on add.",
+    "expectedAssessment": "correct",
+    "rationale": "Correctly identifies the in-memory backend, the class name and the id assignment."
+  },
+  {
+    "question": "Does parseTask also validate the task it produces?",
+    "userAnswer": "No — parseTask only splits the raw string into fields. Validation is a separate validate step that rejects empty titles and empty assignees.",
+    "expectedAssessment": "correct",
+    "rationale": "Correctly separates parsing from validation and names the actual validation rules."
+  },
+  {
+    "question": "What is the complete call chain from the entry point for adding a task?",
+    "userAnswer": "createTracker calls parseTask and then stores the result.",
+    "expectedAssessment": "partial",
+    "rationale": "Names the entry and parsing step but omits validate and the render/format step, and skips the order of store.add."
+  },
+  {
+    "question": "What does src/render/format.ts do, and how does it differ from src/util/format.ts?",
+    "userAnswer": "render/format.ts turns a task into a string. I'm not sure what util/format.ts does.",
+    "expectedAssessment": "partial",
+    "rationale": "Correct about render/format being the task renderer, but cannot distinguish util/format's unrelated string helpers."
+  },
+  {
+    "question": "When is validate called relative to storage?",
+    "userAnswer": "It checks the task at some point after parsing.",
+    "expectedAssessment": "partial",
+    "rationale": "Places validation after parsing but does not state that it runs before store.add, which is the key ordering detail."
+  },
+  {
+    "question": "How do you export the tracked tasks to CSV?",
+    "userAnswer": "Call tracker.exportToCsv('tasks.csv').",
+    "expectedAssessment": "incorrect",
+    "rationale": "No exportToCsv method exists anywhere in the source; the README's CSV claim is not backed by any implementation, so this answer is fabricated."
+  },
+  {
+    "question": "Who assigns a task its id?",
+    "userAnswer": "parseTask generates the id while it splits the raw string.",
+    "expectedAssessment": "incorrect",
+    "rationale": "Ids are assigned by MemoryStore.add, not by parseTask."
+  },
+  {
+    "question": "What happens when parseTask receives an empty title?",
+    "userAnswer": "parseTask throws an error to reject the empty title.",
+    "expectedAssessment": "incorrect",
+    "rationale": "parseTask performs no validation; validate returns { valid: false } for an empty title instead of throwing."
+  }
+]

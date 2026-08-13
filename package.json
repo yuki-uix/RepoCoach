@@ -9,7 +9,7 @@
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p fixtures/fixture-repo/tsconfig.json --noEmit",
     "test": "vitest run",
     "lint": "eslint src test"
   },

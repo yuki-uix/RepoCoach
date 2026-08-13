@@ -1,0 +1,23 @@
+[
+  {
+    "id": "task-creation",
+    "title": "Task creation pipeline",
+    "description": "Trace how a raw string flows from createTracker through parse, validate, store and render.",
+    "entryFiles": ["src/index.ts"],
+    "difficulty": "intro"
+  },
+  {
+    "id": "task-validation",
+    "title": "Task validation rules",
+    "description": "Understand which parsed fields are rejected before a task reaches the store.",
+    "entryFiles": ["src/parse/validate.ts"],
+    "difficulty": "intermediate"
+  },
+  {
+    "id": "in-memory-storage",
+    "title": "In-memory task storage",
+    "description": "See how MemoryStore implements TaskStore and assigns ids.",
+    "entryFiles": ["src/store/memory.ts"],
+    "difficulty": "intermediate"
+  }
+]

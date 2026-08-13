@@ -1,0 +1,37 @@
+[
+  {
+    "step": "createTracker",
+    "path": "src/index.ts",
+    "startLine": 25,
+    "endLine": 43,
+    "symbol": "createTracker"
+  },
+  {
+    "step": "parseTask",
+    "path": "src/parse/task.ts",
+    "startLine": 22,
+    "endLine": 49,
+    "symbol": "parseTask"
+  },
+  {
+    "step": "validate",
+    "path": "src/parse/validate.ts",
+    "startLine": 24,
+    "endLine": 32,
+    "symbol": "validate"
+  },
+  {
+    "step": "store.add",
+    "path": "src/store/memory.ts",
+    "startLine": 17,
+    "endLine": 22,
+    "symbol": "add"
+  },
+  {
+    "step": "format",
+    "path": "src/render/format.ts",
+    "startLine": 12,
+    "endLine": 15,
+    "symbol": "formatTask"
+  }
+]
