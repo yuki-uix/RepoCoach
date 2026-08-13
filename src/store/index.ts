@@ -1,8 +1,88 @@
 /**
- * Session Store
+ * Session Store — persistence for learning sessions and turns.
  *
- * JSON-file persistence for learning sessions, turns and evaluation data.
- * See docs/architecture.md §3 for the module boundary. Not yet implemented —
- * this is a module-boundary placeholder.
+ * The `SessionStore` interface is the seam that lets the JSON-file
+ * implementation (issue #6) drop in without touching the Orchestrator. This
+ * issue ships only the in-memory implementation.
  */
-export {};
+
+import { randomUUID } from "node:crypto";
+import {
+  learningSessionSchema,
+  learningTurnSchema,
+  type LearningSession,
+  type LearningTurn,
+} from "../domain/index.js";
+
+export interface CreateSessionInput {
+  repositoryId: string;
+  featureId: string;
+}
+
+/** Mutable session fields. id / repositoryId / featureId are immutable. */
+export type SessionPatch = Partial<
+  Pick<LearningSession, "phase" | "turnCount" | "status">
+>;
+
+export interface SessionStore {
+  createSession(input: CreateSessionInput): LearningSession;
+  getSession(sessionId: string): LearningSession | undefined;
+  updateSession(sessionId: string, patch: SessionPatch): LearningSession;
+  appendTurn(turn: LearningTurn): void;
+  listTurns(sessionId: string): LearningTurn[];
+}
+
+export class InMemorySessionStore implements SessionStore {
+  private readonly sessions = new Map<string, LearningSession>();
+  private readonly turns = new Map<string, LearningTurn[]>();
+
+  createSession(input: CreateSessionInput): LearningSession {
+    const session = learningSessionSchema.parse({
+      id: randomUUID(),
+      repositoryId: input.repositoryId,
+      featureId: input.featureId,
+      phase: "orientation",
+      turnCount: 0,
+      status: "active",
+    });
+    this.sessions.set(session.id, session);
+    this.turns.set(session.id, []);
+    return session;
+  }
+
+  getSession(sessionId: string): LearningSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  updateSession(sessionId: string, patch: SessionPatch): LearningSession {
+    const current = this.requireSession(sessionId);
+    const next = learningSessionSchema.parse({ ...current, ...patch });
+    this.sessions.set(sessionId, next);
+    return next;
+  }
+
+  appendTurn(turn: LearningTurn): void {
+    const parsed = learningTurnSchema.parse(turn);
+    const turns = this.turns.get(parsed.sessionId);
+    if (turns === undefined) {
+      throw new Error(`Unknown session: ${parsed.sessionId}`);
+    }
+    turns.push(parsed);
+  }
+
+  listTurns(sessionId: string): LearningTurn[] {
+    const turns = this.turns.get(sessionId);
+    if (turns === undefined) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    return [...turns];
+  }
+
+  private requireSession(sessionId: string): LearningSession {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    return session;
+  }
+}
