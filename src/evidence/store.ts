@@ -47,6 +47,18 @@ export class InMemoryEvidenceStore implements EvidenceStore {
   private readonly records: StoredEvidence[] = [];
 
   save(sessionId: string, turnIndex: number, evidence: Evidence): void {
+    // Idempotent: re-validating evidence already saved this turn (e.g. the same
+    // claim cited via both repo_save_evidence and submit_decision) must not
+    // create duplicate records for the recap.
+    const alreadySaved = this.records.some(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.turnIndex === turnIndex &&
+        sameEvidence(record.evidence, evidence),
+    );
+    if (alreadySaved) {
+      return;
+    }
     this.records.push({ sessionId, turnIndex, evidence });
   }
 
@@ -78,4 +90,14 @@ export class InMemoryEvidenceStore implements EvidenceStore {
       content: slice.content,
     };
   }
+}
+
+/** Structural equality for deduplicating identical evidence records. */
+function sameEvidence(a: Evidence, b: Evidence): boolean {
+  return (
+    a.path === b.path &&
+    a.startLine === b.startLine &&
+    a.endLine === b.endLine &&
+    a.reason === b.reason
+  );
 }

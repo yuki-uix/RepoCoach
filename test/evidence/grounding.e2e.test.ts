@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  AgentDecisionInvalidError,
   AgentLoop,
   type ChatCompletionRequest,
   type ChatMessage,
@@ -25,6 +26,51 @@ function toolMessage(id: string, name: string, args: unknown): ChatMessage {
     content: null,
     toolCalls: [{ id, name, arguments: JSON.stringify(args) }],
   };
+}
+
+/** A validator wired to a fresh reader/ledger/store plus a request log. */
+function groundingHarness() {
+  const reader = createReader({
+    cacheRoot: mkdtempSync(join(tmpdir(), "repocoach-cache-")),
+  });
+  const repo: Repository = {
+    source: { kind: "local", path: fixtureRoot },
+    rootDir: fixtureRoot,
+    sha: "fixture",
+    meta: null,
+  };
+  const ledger = new ToolReturnLedger();
+  const store = new InMemoryEvidenceStore();
+  const validator = new GroundingEvidenceValidator({
+    ledger,
+    store,
+    sessionId: "s1",
+  });
+  const requests: ChatCompletionRequest[] = [];
+  return { reader, repo, ledger, store, validator, requests };
+}
+
+/** A loop that replays `responses` verbatim, one per provider call. */
+function scriptedLoop(
+  h: ReturnType<typeof groundingHarness>,
+  responses: ChatMessage[],
+): AgentLoop {
+  let callIndex = 0;
+  const provider: ChatProvider = {
+    async complete(request) {
+      h.requests.push(request);
+      const message = responses[callIndex];
+      callIndex += 1;
+      return { message, usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+  };
+  return new AgentLoop({
+    provider,
+    reader: h.reader,
+    repo: h.repo,
+    evidenceValidator: h.validator,
+    ledger: h.ledger,
+  });
 }
 
 describe("evidence grounding end-to-end", () => {
@@ -171,6 +217,90 @@ describe("evidence grounding end-to-end", () => {
           reason: "validate",
         },
       },
+    ]);
+  });
+
+  it("rejects fabricated evidence in submit_decision, retries, then throws", async () => {
+    const h = groundingHarness();
+    const fabricated = {
+      evidence: [
+        { path: "src/export/csv.ts", startLine: 1, endLine: 5, reason: "exports tasks as CSV" },
+      ],
+      assessment: "correct",
+      nextAction: "show_evidence",
+    };
+    const loop = scriptedLoop(h, [
+      toolMessage("call_1", "submit_decision", fabricated),
+      toolMessage("call_2", "submit_decision", fabricated),
+      toolMessage("call_3", "submit_decision", fabricated),
+    ]);
+
+    await expect(
+      loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    // The model never read anything, so it got the corrective error twice.
+    expect(h.requests).toHaveLength(3);
+    const feedback = h.requests[1].messages.find((m) => m.role === "tool");
+    expect(feedback?.content).toContain("src/export/csv.ts");
+    expect(feedback?.content).toContain("1-5");
+    expect(feedback?.content).toMatch(/read.*first/i);
+    expect(h.store.listBySession("s1")).toEqual([]);
+  });
+
+  it("accepts evidence cited directly in submit_decision after a read", async () => {
+    const h = groundingHarness();
+    const loop = scriptedLoop(h, [
+      toolMessage("call_1", "repo_read_file", {
+        path: "src/parse/validate.ts",
+        startLine: 22,
+        endLine: 32,
+      }),
+      toolMessage("call_2", "submit_decision", {
+        evidence: [{ path: "src/parse/validate.ts", startLine: 24, endLine: 32, reason: "validate" }],
+        assessment: "correct",
+        nextAction: "show_evidence",
+      }),
+    ]);
+
+    const result = await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    expect(result.decision.evidence).toEqual([
+      { path: "src/parse/validate.ts", startLine: 24, endLine: 32, reason: "validate" },
+    ]);
+    expect(h.store.listBySession("s1")).toEqual([
+      {
+        sessionId: "s1",
+        turnIndex: 0,
+        evidence: { path: "src/parse/validate.ts", startLine: 24, endLine: 32, reason: "validate" },
+      },
+    ]);
+  });
+
+  it("re-accepts evidence already saved via repo_save_evidence without duplicating it", async () => {
+    const h = groundingHarness();
+    const evidence = { path: "src/parse/validate.ts", startLine: 24, endLine: 32, reason: "validate" };
+    const loop = scriptedLoop(h, [
+      toolMessage("call_1", "repo_read_file", {
+        path: "src/parse/validate.ts",
+        startLine: 22,
+        endLine: 32,
+      }),
+      toolMessage("call_2", "repo_save_evidence", evidence),
+      toolMessage("call_3", "submit_decision", {
+        evidence: [evidence],
+        assessment: "correct",
+        nextAction: "show_evidence",
+      }),
+    ]);
+
+    const result = await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    expect(result.decision.evidence).toEqual([evidence]);
+    // The same claim validated twice (repo_save_evidence + submit_decision)
+    // yields a single recap record, not a duplicate.
+    expect(h.store.listBySession("s1")).toEqual([
+      { sessionId: "s1", turnIndex: 0, evidence },
     ]);
   });
 });

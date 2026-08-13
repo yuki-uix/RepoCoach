@@ -34,6 +34,7 @@ import type {
   ChatMessage,
   ChatProvider,
   ChatProviderEvent,
+  ToolCall,
   ToolDefinition,
 } from "./provider.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -171,6 +172,25 @@ export class AgentLoop {
     let forceMessageAdded = false;
     const maxRounds = this.maxToolRounds + this.maxDecisionRetries + 2;
 
+    // Shared rejection path for both schema and grounding failures: feed the
+    // corrective message back as a tool result and retry, or throw once the
+    // retry budget is exhausted.
+    const rejectDecision = (toolCall: ToolCall, message: string): void => {
+      decisionRetries += 1;
+      if (decisionRetries > this.maxDecisionRetries) {
+        throw new AgentDecisionInvalidError(
+          `Decision failed validation after ${this.maxDecisionRetries} retries: ${message}`,
+        );
+      }
+      this.emit({ type: "tool_result", name: "submit_decision", result: message });
+      this.logger.warn("agent decision rejected", { message });
+      messages.push({
+        role: "tool",
+        toolCallId: toolCall.id,
+        content: message,
+      });
+    };
+
     for (let round = 0; round < maxRounds; round++) {
       const forceDecision = round >= this.maxToolRounds;
       const tools = forceDecision ? [submitDecisionTool] : this.allTools;
@@ -202,28 +222,22 @@ export class AgentLoop {
         if (toolCall.name === "submit_decision") {
           const outcome = this.parseDecision(toolCall.arguments);
           if (outcome.kind === "ok") {
-            this.emit({ type: "decision_submitted", decision: outcome.decision });
-            this.logger.info("agent decision submitted", {
-              nextAction: outcome.decision.nextAction,
-            });
-            return { decision: outcome.decision, usage };
+            // Ground each cited range at the exit, not only at repo_save_evidence:
+            // the model must not bypass constructive grounding by submitting
+            // fabricated evidence straight into submit_decision.
+            const groundingError = this.validateDecisionEvidence(outcome.decision);
+            if (groundingError === null) {
+              this.emit({ type: "decision_submitted", decision: outcome.decision });
+              this.logger.info("agent decision submitted", {
+                nextAction: outcome.decision.nextAction,
+              });
+              return { decision: outcome.decision, usage };
+            }
+            rejectDecision(toolCall, groundingError);
+            continue;
           }
 
-          decisionRetries += 1;
-          if (decisionRetries > this.maxDecisionRetries) {
-            throw new AgentDecisionInvalidError(
-              `Decision failed schema validation after ${this.maxDecisionRetries} retries: ${outcome.message}`,
-            );
-          }
-          this.emit({ type: "tool_result", name: "submit_decision", result: outcome.message });
-          this.logger.warn("agent decision rejected by schema", {
-            message: outcome.message,
-          });
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            content: outcome.message,
-          });
+          rejectDecision(toolCall, outcome.message);
           continue;
         }
 
@@ -313,6 +327,29 @@ export class AgentLoop {
       };
     }
     return { kind: "ok", decision: parsed.data };
+  }
+
+  /**
+   * Ground every cited range at the submit_decision exit so the model cannot
+   * skip repo_save_evidence and submit fabricated evidence directly. Returns
+   * null when every claim passes (or no validator is configured); otherwise a
+   * corrective message naming each rejected claim.
+   */
+  private validateDecisionEvidence(decision: AgentDecision): string | null {
+    if (this.evidenceValidator === undefined) {
+      return null;
+    }
+    const rejections: string[] = [];
+    for (const evidence of decision.evidence) {
+      const verdict = this.evidenceValidator.validate(evidence);
+      if (!verdict.ok) {
+        rejections.push(verdict.reason);
+      }
+    }
+    if (rejections.length === 0) {
+      return null;
+    }
+    return `Decision rejected: evidence not grounded:\n${rejections.join("\n")}`;
   }
 
   private emit(event: AgentLoopEvent): void {
