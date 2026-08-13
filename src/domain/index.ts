@@ -81,6 +81,12 @@ export const learningSessionSchema = z.object({
   /** Number of questions asked so far (prediction + follow-ups). */
   turnCount: z.number().int().nonnegative(),
   status: sessionStatusSchema,
+  /** ISO 8601 timestamp the session was created. */
+  createdAt: z.iso.datetime().optional(),
+  /** ISO 8601 timestamp of the last mutation (turn appended or phase change). */
+  updatedAt: z.iso.datetime().optional(),
+  /** ISO 8601 timestamp the session reached a terminal phase. */
+  completedAt: z.iso.datetime().optional(),
 });
 export type LearningSession = z.infer<typeof learningSessionSchema>;
 

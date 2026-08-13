@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
   AgentDecision,
   Evidence,
@@ -11,7 +14,11 @@ import {
   type AgentInvokerInput,
   type StepResult,
 } from "../../src/orchestrator/orchestrator";
-import { InMemorySessionStore } from "../../src/store";
+import {
+  InMemorySessionStore,
+  JsonSessionStore,
+  type SessionStore,
+} from "../../src/store";
 
 const USAGE: TokenUsage = { inputTokens: 10, outputTokens: 5 };
 
@@ -35,25 +42,6 @@ function stubAgent(
     return respond(input);
   };
   return { agent, calls };
-}
-
-function makeOrchestrator(
-  agent: AgentInvoker,
-  store: InMemorySessionStore,
-  opts: { maxTurns?: number } = {},
-): { orchestrator: Orchestrator; sessionId: string } {
-  const session = store.createSession({
-    repositoryId: "repo-1",
-    featureId: "feature-1",
-  });
-  const orchestrator = new Orchestrator({
-    agent,
-    store,
-    sessionId: session.id,
-    featureGoal: "understand the parse flow",
-    maxTurns: opts.maxTurns,
-  });
-  return { orchestrator, sessionId: session.id };
 }
 
 /** A happy-path agent: orientation → hypothesis → trace → questioning → feedback → recap. */
@@ -86,11 +74,55 @@ function happyPath(input: AgentInvokerInput): AgentInvocation {
   }
 }
 
-describe("Orchestrator", () => {
+/** Both store implementations, so the suite proves the interface is substitutable. */
+const STORE_CASES = [
+  {
+    name: "InMemorySessionStore",
+    makeStore: (): SessionStore => new InMemorySessionStore(),
+    cleanup: (): void => {},
+  },
+  {
+    name: "JsonSessionStore",
+    makeStore: (): SessionStore =>
+      new JsonSessionStore(mkdtempSync(join(tmpdir(), "repocoach-orch-"))),
+    cleanup: (store: SessionStore): void => {
+      rmSync((store as JsonSessionStore).dataDir, { recursive: true, force: true });
+    },
+  },
+];
+
+describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
+  let store: SessionStore;
+
+  beforeEach(() => {
+    store = makeStore();
+  });
+
+  afterEach(() => {
+    cleanup(store);
+  });
+
+  function makeOrchestrator(
+    agent: AgentInvoker,
+    opts: { maxTurns?: number } = {},
+  ): { orchestrator: Orchestrator; sessionId: string } {
+    const session = store.createSession({
+      repositoryId: "repo-1",
+      featureId: "feature-1",
+    });
+    const orchestrator = new Orchestrator({
+      agent,
+      store,
+      sessionId: session.id,
+      featureGoal: "understand the parse flow",
+      maxTurns: opts.maxTurns,
+    });
+    return { orchestrator, sessionId: session.id };
+  }
+
   it("drives the full happy path from orientation to recap", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent(happyPath);
-    const { orchestrator, sessionId } = makeOrchestrator(agent, store);
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
 
     expect((await orchestrator.step()).phase).toBe("hypothesis"); // orientation → hypothesis
     expect((await orchestrator.step()).phase).toBe("hypothesis"); // ask prediction
@@ -111,7 +143,6 @@ describe("Orchestrator", () => {
   });
 
   it("never enters trace without a user answer", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
@@ -122,7 +153,7 @@ describe("Orchestrator", () => {
         usage: USAGE,
       };
     });
-    const { orchestrator, sessionId } = makeOrchestrator(agent, store);
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     const result = await orchestrator.step(); // hypothesis, no answer
@@ -133,14 +164,13 @@ describe("Orchestrator", () => {
   });
 
   it("records an explicit skip and still reaches trace", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
       }
       return { decision: decision({ question: "predict", nextAction: "ask" }), usage: USAGE };
     });
-    const { orchestrator } = makeOrchestrator(agent, store);
+    const { orchestrator } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     const result = await orchestrator.skip();
@@ -150,14 +180,13 @@ describe("Orchestrator", () => {
   });
 
   it("forwards an explicit skip to the agent", async () => {
-    const store = new InMemorySessionStore();
     const { agent, calls } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
       }
       return { decision: decision({ question: "predict", nextAction: "ask" }), usage: USAGE };
     });
-    const { orchestrator } = makeOrchestrator(agent, store);
+    const { orchestrator } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     await orchestrator.skip(); // hypothesis, skipped
@@ -166,14 +195,13 @@ describe("Orchestrator", () => {
   });
 
   it("does not set skipped on a normal answer", async () => {
-    const store = new InMemorySessionStore();
     const { agent, calls } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
       }
       return { decision: decision({ question: "predict", nextAction: "ask" }), usage: USAGE };
     });
-    const { orchestrator } = makeOrchestrator(agent, store);
+    const { orchestrator } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     await orchestrator.step("parse()"); // hypothesis, answered → trace
@@ -182,7 +210,6 @@ describe("Orchestrator", () => {
   });
 
   it("forces recap once the turn limit is reached", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
       switch (input.phase) {
         case "orientation":
@@ -206,7 +233,7 @@ describe("Orchestrator", () => {
           throw new Error(`unexpected phase ${input.phase}`);
       }
     });
-    const { orchestrator, sessionId } = makeOrchestrator(agent, store, {
+    const { orchestrator, sessionId } = makeOrchestrator(agent, {
       maxTurns: 5,
     });
 
@@ -229,14 +256,13 @@ describe("Orchestrator", () => {
   });
 
   it("lets the rules overrule an illegal nextAction suggestion", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return { decision: decision({ nextAction: "finish" }), usage: USAGE };
       }
       return { decision: decision({ nextAction: "ask" }), usage: USAGE };
     });
-    const { orchestrator, sessionId } = makeOrchestrator(agent, store);
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
 
     const result = await orchestrator.step(); // orientation, agent says "finish"
 
@@ -246,7 +272,6 @@ describe("Orchestrator", () => {
   });
 
   it("retries an invalid decision twice, then moves to error", async () => {
-    const store = new InMemorySessionStore();
     let attempts = 0;
     const { agent, calls } = stubAgent(() => {
       attempts += 1;
@@ -255,7 +280,7 @@ describe("Orchestrator", () => {
         usage: USAGE,
       };
     });
-    const { orchestrator, sessionId } = makeOrchestrator(agent, store);
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
 
     const result = await orchestrator.step();
 
@@ -268,7 +293,6 @@ describe("Orchestrator", () => {
   });
 
   it("forces recap when the token budget is exceeded", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent((input) => {
       if (input.phase === "orientation") {
         return {
@@ -278,7 +302,7 @@ describe("Orchestrator", () => {
       }
       return { decision: decision({ nextAction: "ask" }), usage: USAGE };
     });
-    const { orchestrator } = makeOrchestrator(agent, store);
+    const { orchestrator } = makeOrchestrator(agent);
 
     const result = await orchestrator.step(); // orientation, over budget
 
@@ -288,9 +312,8 @@ describe("Orchestrator", () => {
   });
 
   it("throws when stepped after reaching a terminal phase", async () => {
-    const store = new InMemorySessionStore();
     const { agent } = stubAgent(happyPath);
-    const { orchestrator } = makeOrchestrator(agent, store);
+    const { orchestrator } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     await orchestrator.step(); // ask prediction
