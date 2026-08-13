@@ -1,0 +1,10 @@
+{
+  "name": "taskloom",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal task tracking library — a RepoCoach eval fixture (data only, never installed or executed).",
+  "type": "module",
+  "scripts": {
+    "postinstall": "echo 'taskloom fixture: postinstall must never be executed'"
+  }
+}
