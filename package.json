@@ -6,7 +6,7 @@
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
