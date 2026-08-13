@@ -1,9 +1,18 @@
 /**
- * Evidence Store
+ * Evidence module — constructive grounding and the evidence store.
  *
- * Saves file paths, line numbers and citation reasons, and enforces
- * constructive grounding (citations must come from this turn's tool returns).
- * See docs/architecture.md §3 for the module boundary. Not yet implemented —
- * this is a module-boundary placeholder.
+ * `ToolReturnLedger` records what the read/search tools actually returned this
+ * turn; `GroundingEvidenceValidator` accepts only claims grounded in that
+ * record and saves them to the `EvidenceStore`, which recap can use to jump
+ * back to the source. See docs/architecture.md §1, §3.
  */
-export {};
+
+export { ToolReturnLedger } from "./ledger.js";
+export { GroundingEvidenceValidator } from "./grounding.js";
+export type { GroundingValidatorOptions } from "./grounding.js";
+export { InMemoryEvidenceStore } from "./store.js";
+export type {
+  EvidenceStore,
+  SourceContext,
+  StoredEvidence,
+} from "./store.js";

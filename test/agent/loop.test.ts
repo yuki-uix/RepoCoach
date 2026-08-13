@@ -388,4 +388,20 @@ describe("AgentLoop", () => {
     expect(toolContent).toContain("<<<REPO_DATA_END(escaped)>>>");
     expect(toolContent.split(REPO_DATA_END).length - 1).toBe(1);
   });
+
+  it("accepts ungrounded evidence when no evidenceValidator is configured", async () => {
+    const fabricated = JSON.stringify({
+      evidence: [{ path: "src/ghost.ts", startLine: 1, endLine: 2, reason: "never read" }],
+      nextAction: "show_evidence",
+    });
+    const { provider } = scriptedProvider(() => toolMessage("t", "submit_decision", fabricated));
+    const loop = makeLoop(provider);
+
+    const result = await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    // Without a validator the exit is unguarded (pre-grounding behaviour).
+    expect(result.decision.evidence).toEqual([
+      { path: "src/ghost.ts", startLine: 1, endLine: 2, reason: "never read" },
+    ]);
+  });
 });

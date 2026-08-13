@@ -17,6 +17,8 @@ import type { ToolDefinition } from "./provider.js";
 
 export interface EvidenceValidator {
   validate(evidence: Evidence): { ok: true } | { ok: false; reason: string };
+  /** Optional per-turn hook; the loop calls it at the start of each turn. */
+  setTurnIndex?(turnIndex: number): void;
 }
 
 /** Default validator: every claim passes (constructive grounding lands in #5). */
@@ -26,10 +28,20 @@ export const acceptAllEvidence: EvidenceValidator = {
   },
 };
 
+/**
+ * Records the (path, line range) a tool actually returned, so the evidence
+ * validator can later prove a claim was read this turn. The loop binds this to
+ * the ToolReturnLedger (see src/evidence/ledger.ts).
+ */
+export interface ReturnRecorder {
+  record(path: string, startLine: number, endLine: number): void;
+}
+
 export interface ToolRuntime {
   reader: Reader;
   repo: Repository;
   evidenceValidator?: EvidenceValidator;
+  returnRecorder?: ReturnRecorder;
 }
 
 export interface ToolExecution {
@@ -227,6 +239,15 @@ async function search(
   if (matches.length === 0) {
     return "No matches found.";
   }
+  for (const match of matches) {
+    // Record the range actually returned: the match line plus whatever context
+    // lines ripgrep really produced (fewer at file boundaries).
+    runtime.returnRecorder?.record(
+      match.path,
+      match.line - match.contextBefore.length,
+      match.line + match.contextAfter.length,
+    );
+  }
   return matches.map(formatSearchMatch).join("\n\n");
 }
 
@@ -258,6 +279,8 @@ function readFile(
     args.startLine,
     args.endLine,
   );
+  // Record the slice actually returned (clamped), not the requested range.
+  runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
   const header = `${args.path} (lines ${slice.startLine}-${slice.endLine} of ${slice.totalLines})`;
   if (slice.content === "") {
     return `${header}\n(empty)`;
