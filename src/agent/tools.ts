@@ -143,7 +143,7 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
 
   async function execute(execution: ToolExecution): Promise<string> {
     try {
-      return executeTool(runtime, validator, execution);
+      return await executeTool(runtime, validator, execution);
     } catch (error) {
       return `Error: ${error instanceof Error ? error.message : String(error)}`;
     }

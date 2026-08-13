@@ -6,6 +6,7 @@ import {
   type ToolRegistry,
 } from "../../src/agent";
 import { makeTempReader } from "./helpers";
+import type { Reader } from "../../src/reader";
 
 const FILES = {
   "package.json": JSON.stringify({
@@ -48,6 +49,7 @@ describe("tool registry", () => {
     });
     expect(result).toBe("Error: unknown tool: nope");
   });
+
 });
 
 describe("repo_get_tree", () => {
@@ -97,6 +99,22 @@ describe("repo_search", () => {
       collectedEvidence: [],
     });
     expect(result).toContain("src/index.ts:2:3: return");
+  });
+
+  it("downgrades an async Reader rejection to an error string", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const throwingReader: Reader = {
+      ...reader,
+      search: () => Promise.reject(new Error("reader exploded")),
+    };
+    const registry = createToolRegistry({ reader: throwingReader, repo });
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "anything" },
+      collectedEvidence: [],
+    });
+    expect(result).toMatch(/^Error: /);
+    expect(result).toContain("reader exploded");
   });
 });
 
