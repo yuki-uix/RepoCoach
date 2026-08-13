@@ -32,6 +32,21 @@ export interface SessionStore {
   listTurns(sessionId: string): LearningTurn[];
 }
 
+/**
+ * Extension for stores that persist sessions beyond the process lifetime.
+ * Adds the two queries the JSON-file implementation needs for the CLI (#7):
+ * session duration (the "15-minute" measurement source) and enumeration.
+ */
+export interface PersistentSessionStore extends SessionStore {
+  /** Milliseconds between session creation and completion (or now). */
+  sessionDuration(sessionId: string): number;
+  /** Every persisted session, oldest first. */
+  listSessions(): LearningSession[];
+}
+
+export { JsonSessionStore, resumeSession } from "./json-store.js";
+export type { ResumedSession } from "./json-store.js";
+
 export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, LearningSession>();
   private readonly turns = new Map<string, LearningTurn[]>();
