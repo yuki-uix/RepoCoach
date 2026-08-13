@@ -12,7 +12,7 @@ import {
   type Reader,
 } from "../../src/reader";
 import { JsonSessionStore, resumeSession } from "../../src/store";
-import { cleanupDir, createTempRepo, runGit } from "../reader/helpers";
+import { cleanupDir, createTempRepo, runGit, writeFiles } from "../reader/helpers";
 import { capturedStreams, fixtureRoot, makeDataDir } from "./helpers";
 
 const tempDirs: string[] = [];
@@ -217,6 +217,91 @@ describe("CLI resume pins the commit SHA (P1)", () => {
 
     expect(repo2.sha).toBe(oldSha);
     expect(readFileSlice(repo2.rootDir, "a.txt").content).toBe("old");
+  });
+});
+
+describe("CLI does not pin a dirty local git root (P1)", () => {
+  it("does not pin a SHA when a tracked file has uncommitted changes", async () => {
+    const repo = await createTempRepo({ "a.txt": "committed\n" });
+    tempDirs.push(repo.dir);
+    // Edit a tracked file without committing — the tree is now dirty.
+    writeFiles(repo.dir, { "a.txt": "uncommitted\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+    const dataDir = makeDataDir();
+
+    const reader = recordingReader(createReader({ cacheRoot }));
+
+    // Phase 1 — start from the dirty local git root, then crash on the first
+    // agent call so the session stays active, like an interrupt.
+    const streams1 = capturedStreams();
+    streams1.stdin.write("1\n");
+    const code1 = await runCli(["start", repo.dir], {
+      dataDir,
+      reader,
+      provider: crashingProvider(),
+      stdin: streams1.stdin,
+      stdout: streams1.stdout,
+      stderr: streams1.stderr,
+    });
+    streams1.stdin.end();
+    expect(code1).toBe(1);
+
+    const session = new JsonSessionStore(dataDir).listSessions()[0];
+    // No `#sha` suffix: a dirty tree is not reproducible from HEAD alone.
+    expect(session?.repositoryId).toBe(repo.dir);
+    expect(session?.repositoryId).not.toContain("#");
+    expect(reader.imports[0]?.sha).toBe("");
+
+    // Phase 2 — resume: warns and analyses the current working tree in place,
+    // so the uncommitted content is still visible.
+    const streams2 = capturedStreams();
+    const code2 = await runCli(["resume", session!.id], {
+      dataDir,
+      reader,
+      provider: crashingProvider(),
+      stdin: streams2.stdin,
+      stdout: streams2.stdout,
+      stderr: streams2.stderr,
+    });
+    expect(code2).toBe(1);
+
+    const resumedImport = reader.imports.at(-1);
+    expect(resumedImport?.input).toBe(repo.dir);
+    expect(resumedImport?.ref).toBeUndefined();
+    expect(resumedImport?.rootDir).toBe(repo.dir);
+    expect(readFileSlice(resumedImport!.rootDir, "a.txt").content).toBe("uncommitted");
+    expect(streams2.stderrText()).toContain("本地路径内容可能已变化");
+  });
+
+  it("does not pin a SHA when the tree has an untracked file", async () => {
+    const repo = await createTempRepo({ "a.txt": "committed\n" });
+    tempDirs.push(repo.dir);
+    // A new, untracked file also makes the tree dirty.
+    writeFiles(repo.dir, { "untracked.txt": "new\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+    const dataDir = makeDataDir();
+
+    const reader = recordingReader(createReader({ cacheRoot }));
+
+    const streams1 = capturedStreams();
+    streams1.stdin.write("1\n");
+    const code1 = await runCli(["start", repo.dir], {
+      dataDir,
+      reader,
+      provider: crashingProvider(),
+      stdin: streams1.stdin,
+      stdout: streams1.stdout,
+      stderr: streams1.stderr,
+    });
+    streams1.stdin.end();
+    expect(code1).toBe(1);
+
+    const session = new JsonSessionStore(dataDir).listSessions()[0];
+    expect(session?.repositoryId).toBe(repo.dir);
+    expect(session?.repositoryId).not.toContain("#");
+    expect(reader.imports[0]?.sha).toBe("");
   });
 });
 

@@ -86,9 +86,11 @@ export async function cloneRepo(
 
   if (source.kind === "local") {
     // Local paths are used directly (fixtures / eval) — no clone, no cache —
-    // except when the path is itself a git repo root AND a ref was requested,
-    // in which case a resume wants to pin that ref, so we clone it (a local
-    // clone is cheap) and check it out.
+    // except when the path is itself a clean git repo root AND a ref was
+    // requested, in which case a resume wants to pin that ref, so we clone it
+    // (a local clone is cheap) and check it out. `headSha` returns "" for a
+    // subdirectory, a non-git path, or a dirty working tree, all of which keep
+    // working-tree semantics (use the path in place, no pin).
     const sha = await headSha(source.path, git);
     if (opts.ref !== undefined && sha !== "") {
       return cloneLocalAtRef(source.path, opts.ref, opts.cacheRoot, git);
@@ -218,16 +220,24 @@ async function isNonEmptyDir(dir: string): Promise<boolean> {
 }
 
 /**
- * Resolve the checked-out commit SHA, or "" when the path is not itself a git
- * repo root. A subdirectory of a repo (or a non-git path) has no stable pin:
- * `git rev-parse --show-toplevel` resolves above it, so only a path that IS
- * the toplevel gets a SHA — everything else reports "" to stay honest about
- * what a resume can pin.
+ * Resolve a pin for a local path, or "" when the path has no reproducible
+ * commit to pin. Only a clean git repo root is pinnable: a subdirectory of a
+ * repo (or a non-git path) has no stable pin (`git rev-parse --show-toplevel`
+ * resolves above it), and a dirty working tree (staged, modified, or untracked
+ * files) would be silently dropped by a resume that clones the pinned SHA —
+ * both report "" so a resume honestly analyses the current working tree
+ * instead. The clean check and the HEAD read are a single atomic pair: the
+ * SHA is returned only when `--porcelain` was empty at that instant.
  */
 async function headSha(rootDir: string, git: GitRunner): Promise<string> {
   try {
     const topLevel = (await git(["rev-parse", "--show-toplevel"], rootDir)).trim();
     if ((await realpath(topLevel)) !== (await realpath(rootDir))) {
+      return "";
+    }
+    // `--porcelain` is empty exactly when nothing is staged, modified, or
+    // untracked — the only state a HEAD SHA faithfully reproduces.
+    if ((await git(["status", "--porcelain"], rootDir)).trim() !== "") {
       return "";
     }
     return (await git(["rev-parse", "HEAD"], rootDir)).trim();
