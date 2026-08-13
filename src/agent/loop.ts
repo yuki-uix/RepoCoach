@@ -20,7 +20,11 @@ import type {
   AgentInvokerInput,
 } from "../orchestrator/orchestrator.js";
 import type { Repository, Reader } from "../reader/index.js";
-import { wrapRepoData, type RepoDataMeta } from "./data-guard.js";
+import {
+  wrapRepoData,
+  wrapUntrustedContext,
+  type RepoDataMeta,
+} from "./data-guard.js";
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { describeError, formatZodError } from "./errors.js";
 import type { AgentLogger } from "./logger.js";
@@ -254,7 +258,13 @@ export class AgentLoop {
     ];
     const history = summarizeTurnHistory(input.turnHistory);
     if (history !== null) {
-      messages.push({ role: "user", content: history });
+      // Turn-history fields are model-generated from repo content, so they are
+      // as untrusted as a file read. Wrap the whole summary rather than letting
+      // copied-through instructions re-enter context as unmarked directives.
+      messages.push({
+        role: "user",
+        content: wrapUntrustedContext(history, { kind: "turn_history" }),
+      });
     }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;

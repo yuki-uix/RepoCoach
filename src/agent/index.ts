@@ -38,10 +38,14 @@ export {
   REPO_DATA_END,
   REPO_DATA_START,
   REPO_DATA_WARNING,
-  escapeRepoData,
+  UNTRUSTED_DATA_END,
+  UNTRUSTED_DATA_START,
+  UNTRUSTED_DATA_WARNING,
+  escapeDataMarkers,
   wrapRepoData,
+  wrapUntrustedContext,
 } from "./data-guard.js";
-export type { RepoDataMeta } from "./data-guard.js";
+export type { RepoDataMeta, UntrustedContextMeta } from "./data-guard.js";
 
 export { acceptAllEvidence, createToolRegistry } from "./tools.js";
 export type {

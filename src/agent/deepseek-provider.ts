@@ -96,9 +96,13 @@ export class DeepSeekProvider implements ChatProvider {
         body: JSON.stringify(body),
       });
     } catch (error) {
-      throw new Error(`DeepSeek request failed: ${describeError(error)}`, {
-        cause: error,
-      });
+      // Deliberately do not attach the raw error as `cause`: a low-level fetch
+      // failure can echo the Authorization header, which would leak the key
+      // into the cause chain. The message is redacted instead.
+      // eslint-disable-next-line preserve-caught-error
+      throw new Error(
+        `DeepSeek request failed: ${redact(describeError(error), this.apiKey)}`,
+      );
     }
 
     if (!response.ok) {
@@ -117,9 +121,28 @@ export class DeepSeekProvider implements ChatProvider {
       throw new Error("DeepSeek API returned an empty response body");
     }
 
-    const { message, usage } = await assembleSseStream(response.body, onEvent);
+    const { message, usage } = await readStream(response.body, this.apiKey, onEvent);
     this.logger.debug("DeepSeekProvider: response", { usage });
     return { message, usage };
+  }
+}
+
+/**
+ * Assemble the SSE stream, redacting the key from any stream-level error so a
+ * low-level network failure echoing request headers cannot leak it.
+ */
+async function readStream(
+  body: ReadableStream<Uint8Array>,
+  apiKey: string,
+  onEvent?: (event: ChatProviderEvent) => void,
+): Promise<{ message: ChatMessage; usage: TokenUsage }> {
+  try {
+    return await assembleSseStream(body, onEvent);
+  } catch (error) {
+    // Same rationale as complete(): never attach the raw stream error as
+    // `cause` — it could echo the request headers, including the key.
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(`DeepSeek stream failed: ${redact(describeError(error), apiKey)}`);
   }
 }
 

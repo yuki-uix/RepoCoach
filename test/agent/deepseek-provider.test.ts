@@ -134,6 +134,36 @@ describe("DeepSeekProvider error handling", () => {
       provider.complete({ model: "deepseek-v4-flash", messages: [] }),
     ).rejects.toThrow(/DeepSeek API error 500: boom/);
   });
+
+  it("redacts the key from fetch failures without leaking it through the cause chain", async () => {
+    const provider = makeProvider({
+      fetchFn: async () => {
+        throw new Error(`network failure: Authorization Bearer ${KEY} rejected`);
+      },
+    });
+
+    let thrown: unknown;
+    try {
+      await provider.complete({ model: "deepseek-v4-flash", messages: [] });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toMatch(/DeepSeek request failed/);
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain(KEY);
+
+    // The raw error echoed the Authorization header; the cause chain must not
+    // carry it through unredacted.
+    let cause: unknown = (thrown as Error).cause;
+    while (cause !== undefined) {
+      const causeText = cause instanceof Error ? cause.message : String(cause);
+      expect(causeText).not.toContain(KEY);
+      cause = cause instanceof Error ? cause.cause : undefined;
+    }
+  });
 });
 
 describe("DeepSeekProvider request shape", () => {
