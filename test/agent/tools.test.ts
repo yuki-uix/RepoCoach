@@ -3,6 +3,7 @@ import {
   createToolRegistry,
   type Evidence,
   type EvidenceValidator,
+  type ReturnRecorder,
   type ToolRegistry,
 } from "../../src/agent";
 import { makeTempReader } from "./helpers";
@@ -25,6 +26,37 @@ function makeRegistry(
   const { reader, repo } = makeTempReader(FILES);
   const collected: Evidence[] = [];
   const registry = createToolRegistry({ reader, repo, evidenceValidator });
+  return { registry, collected };
+}
+
+interface RecordedRange {
+  path: string;
+  startLine: number;
+  endLine: number;
+}
+
+function makeRecordingRecorder(): {
+  recorder: ReturnRecorder;
+  records: RecordedRange[];
+} {
+  const records: RecordedRange[] = [];
+  return {
+    records,
+    recorder: {
+      record(path, startLine, endLine) {
+        records.push({ path, startLine, endLine });
+      },
+    },
+  };
+}
+
+function makeRegistryWithRecorder(recorder: ReturnRecorder): {
+  registry: ToolRegistry;
+  collected: Evidence[];
+} {
+  const { reader, repo } = makeTempReader(FILES);
+  const collected: Evidence[] = [];
+  const registry = createToolRegistry({ reader, repo, returnRecorder: recorder });
   return { registry, collected };
 }
 
@@ -174,5 +206,63 @@ describe("repo_save_evidence", () => {
     });
     expect(result).toContain("Error: invalid evidence");
     expect(collected).toHaveLength(0);
+  });
+});
+
+describe("return recording", () => {
+  it("records the actual returned slice range, not the requested range", async () => {
+    const { recorder, records } = makeRecordingRecorder();
+    const { registry } = makeRegistryWithRecorder(recorder);
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 99 },
+      collectedEvidence: [],
+    });
+
+    // src/index.ts has 3 lines; the request for 1-99 is clamped to 1-3.
+    expect(records).toEqual([{ path: "src/index.ts", startLine: 1, endLine: 3 }]);
+  });
+
+  it("records each search match line plus its context lines", async () => {
+    const { recorder, records } = makeRecordingRecorder();
+    const { registry } = makeRegistryWithRecorder(recorder);
+
+    // "return" matches src/index.ts line 2; default context is 2 lines,
+    // so the actual returned range is line 1 through line 3.
+    await registry.execute({
+      name: "repo_search",
+      args: { pattern: "return" },
+      collectedEvidence: [],
+    });
+
+    expect(records).toContainEqual({ path: "src/index.ts", startLine: 1, endLine: 3 });
+  });
+
+  it("records only the match line when no context is requested", async () => {
+    const { recorder, records } = makeRecordingRecorder();
+    const { registry } = makeRegistryWithRecorder(recorder);
+
+    await registry.execute({
+      name: "repo_search",
+      args: { pattern: "return", contextLines: 0 },
+      collectedEvidence: [],
+    });
+
+    expect(records).toContainEqual({ path: "src/index.ts", startLine: 2, endLine: 2 });
+  });
+
+  it("does not record tree or package-info results", async () => {
+    const { recorder, records } = makeRecordingRecorder();
+    const { registry } = makeRegistryWithRecorder(recorder);
+
+    await registry.execute({ name: "repo_get_tree", args: {}, collectedEvidence: [] });
+    await registry.execute({
+      name: "repo_get_package_info",
+      args: {},
+      collectedEvidence: [],
+    });
+
+    expect(records).toHaveLength(0);
   });
 });

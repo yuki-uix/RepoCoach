@@ -20,6 +20,7 @@ import type {
   AgentInvokerInput,
 } from "../orchestrator/orchestrator.js";
 import type { Repository, Reader } from "../reader/index.js";
+import type { ToolReturnLedger } from "../evidence/ledger.js";
 import {
   wrapRepoData,
   wrapUntrustedContext,
@@ -67,6 +68,8 @@ export interface AgentLoopOptions {
   maxToolRounds?: number;
   maxDecisionRetries?: number;
   evidenceValidator?: EvidenceValidator;
+  /** Per-turn record of tool returns; reset at the start of every turn. */
+  ledger?: ToolReturnLedger;
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -130,16 +133,21 @@ export class AgentLoop {
   private readonly model: string;
   private readonly maxToolRounds: number;
   private readonly maxDecisionRetries: number;
+  private readonly evidenceValidator?: EvidenceValidator;
+  private readonly ledger?: ToolReturnLedger;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
+    this.evidenceValidator = options.evidenceValidator;
+    this.ledger = options.ledger;
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
       evidenceValidator: options.evidenceValidator,
+      returnRecorder: options.ledger,
     });
     this.model = options.model ?? DEFAULT_DEEPSEEK_MODEL;
     this.maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
@@ -151,6 +159,10 @@ export class AgentLoop {
 
   /** Run one agent turn, matching the Orchestrator's AgentInvoker contract. */
   async invoke(input: AgentInvokerInput): Promise<AgentInvocation> {
+    // A new turn starts: clear last turn's tool returns and advance the
+    // validator's turn association (turnIndex = number of completed turns).
+    this.ledger?.resetTurn();
+    this.evidenceValidator?.setTurnIndex?.(input.turnHistory.length);
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     const collectedEvidence: Evidence[] = [];
     const messages = this.buildInitialMessages(input);

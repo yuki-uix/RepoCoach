@@ -50,6 +50,7 @@ export type { RepoDataMeta, UntrustedContextMeta } from "./data-guard.js";
 export { acceptAllEvidence, createToolRegistry } from "./tools.js";
 export type {
   EvidenceValidator,
+  ReturnRecorder,
   ToolExecution,
   ToolRegistry,
   ToolRuntime,
