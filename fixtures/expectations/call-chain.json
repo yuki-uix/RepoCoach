@@ -1,35 +1,35 @@
 [
   {
     "step": "createTracker",
-    "path": "fixtures/fixture-repo/src/index.ts",
+    "path": "src/index.ts",
     "startLine": 25,
     "endLine": 43,
     "symbol": "createTracker"
   },
   {
     "step": "parseTask",
-    "path": "fixtures/fixture-repo/src/parse/task.ts",
+    "path": "src/parse/task.ts",
     "startLine": 22,
-    "endLine": 47,
+    "endLine": 49,
     "symbol": "parseTask"
   },
   {
     "step": "validate",
-    "path": "fixtures/fixture-repo/src/parse/validate.ts",
+    "path": "src/parse/validate.ts",
     "startLine": 24,
     "endLine": 32,
     "symbol": "validate"
   },
   {
     "step": "store.add",
-    "path": "fixtures/fixture-repo/src/store/memory.ts",
+    "path": "src/store/memory.ts",
     "startLine": 17,
     "endLine": 22,
     "symbol": "add"
   },
   {
     "step": "format",
-    "path": "fixtures/fixture-repo/src/render/format.ts",
+    "path": "src/render/format.ts",
     "startLine": 12,
     "endLine": 15,
     "symbol": "formatTask"

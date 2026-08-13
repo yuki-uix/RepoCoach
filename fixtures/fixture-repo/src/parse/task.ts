@@ -27,12 +27,14 @@ export function parseTask(raw: string): ParsedTask {
   let status: Status = "todo";
 
   for (const token of tokens) {
+    const value = token.slice(1);
+
     if (token.startsWith("@") && token.length > 1) {
-      assignee = token.slice(1);
-    } else if (token.startsWith("!") && isPriority(token.slice(1))) {
-      priority = token.slice(1);
-    } else if (token.startsWith("#") && isStatus(token.slice(1))) {
-      status = token.slice(1);
+      assignee = value;
+    } else if (token.startsWith("!") && isPriority(value)) {
+      priority = value;
+    } else if (token.startsWith("#") && isStatus(value)) {
+      status = value;
     } else {
       title.push(token);
     }

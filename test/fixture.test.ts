@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixturesRoot = join(repoRoot, "fixtures");
+const fixtureRepoRoot = join(fixturesRoot, "fixture-repo");
 
 interface CallChainEntry {
   step: string;
@@ -65,7 +66,7 @@ describe("fixture expectations: call-chain", () => {
       expect(entry.startLine).toBeGreaterThanOrEqual(1);
       expect(entry.endLine).toBeGreaterThanOrEqual(entry.startLine);
 
-      const lines = readFileSync(join(repoRoot, entry.path), "utf8").split("\n");
+      const lines = readFileSync(join(fixtureRepoRoot, entry.path), "utf8").split("\n");
       expect(entry.endLine).toBeLessThanOrEqual(lines.length);
 
       const range = lines.slice(entry.startLine - 1, entry.endLine).join("\n");
