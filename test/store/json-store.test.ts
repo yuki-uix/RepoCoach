@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -101,7 +107,10 @@ describe("JsonSessionStore", () => {
     first.appendTurn(turn2);
 
     const second = new JsonSessionStore(dataDir);
-    expect(second.getSession(session.id)).toEqual(session);
+    const reloaded = second.getSession(session.id);
+    expect(reloaded).toBeDefined();
+    // Appending a turn refreshes updatedAt, so compare everything else.
+    expect({ ...reloaded, updatedAt: session.updatedAt }).toEqual(session);
     expect(second.listTurns(session.id)).toEqual([turn1, turn2]);
   });
 
@@ -126,6 +135,37 @@ describe("JsonSessionStore", () => {
       expect(done?.updatedAt).toBe("2026-01-01T00:05:00.000Z");
       expect(done?.completedAt).toBe("2026-01-01T00:05:00.000Z");
       expect(store.sessionDuration(session.id)).toBe(300_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes updatedAt when a turn is appended", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const store = new JsonSessionStore(dataDir);
+      const session = store.createSession({
+        repositoryId: "repo-1",
+        featureId: "feature-1",
+      });
+      expect(session.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+
+      vi.setSystemTime(new Date("2026-01-01T00:03:00.000Z"));
+      store.appendTurn({
+        sessionId: session.id,
+        question: "Where does parsing start?",
+        userAnswer: "parse()",
+        evidence: [EVIDENCE],
+        assessment: "partial",
+        feedback: "Close.",
+        skipped: false,
+        decisionOverridden: false,
+      });
+
+      expect(store.getSession(session.id)?.updatedAt).toBe(
+        "2026-01-01T00:03:00.000Z",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -164,6 +204,58 @@ describe("JsonSessionStore", () => {
     expect(() => store.getSession("leaky")).not.toThrow(/LEAKME/);
     expect(() => store.getSession("schema")).toThrow(/schema mismatch/);
     expect(() => store.getSession("schema")).toThrow(/schema\.json/);
+  });
+});
+
+describe("JsonSessionStore session id validation", () => {
+  const BAD_IDS = [
+    "../../escape",
+    "a/b",
+    "",
+    "%2e%2e%2fescape",
+    "x".repeat(65),
+  ];
+
+  const TURN: Omit<LearningTurn, "sessionId"> = {
+    question: "q",
+    userAnswer: "a",
+    evidence: [],
+    assessment: "correct",
+    feedback: "f",
+    skipped: false,
+    decisionOverridden: false,
+  };
+
+  it("rejects traversal and malformed ids without touching the filesystem", () => {
+    const store = new JsonSessionStore(dataDir);
+
+    for (const id of BAD_IDS) {
+      expect(() => store.getSession(id)).toThrow(/Invalid session id/);
+      expect(() => store.listTurns(id)).toThrow(/Invalid session id/);
+      expect(() => store.sessionDuration(id)).toThrow(/Invalid session id/);
+      expect(() => store.updateSession(id, { phase: "recap" })).toThrow(
+        /Invalid session id/,
+      );
+      expect(() => store.appendTurn({ sessionId: id, ...TURN })).toThrow(
+        /Invalid session id/,
+      );
+    }
+
+    // Every call failed at the entry gate, so no write reached the disk — the
+    // sessions directory was never even created.
+    expect(readdirSync(dataDir)).toEqual([]);
+  });
+
+  it("accepts a normal UUID unchanged", () => {
+    const store = new JsonSessionStore(dataDir);
+    const session = store.createSession({
+      repositoryId: "repo-1",
+      featureId: "feature-1",
+    });
+
+    expect(store.getSession(session.id)).toEqual(session);
+    expect(store.listTurns(session.id)).toEqual([]);
+    expect(store.sessionDuration(session.id)).toBeGreaterThanOrEqual(0);
   });
 });
 

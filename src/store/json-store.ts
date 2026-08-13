@@ -19,7 +19,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   learningSessionSchema,
@@ -42,6 +42,21 @@ const sessionFileSchema = z.object({
 type SessionFile = z.infer<typeof sessionFileSchema>;
 
 const JSON_EXTENSION = ".json";
+
+/**
+ * Session ids are written into file paths, so they must stay a single, safe
+ * filename segment. `randomUUID()` produces 36 hex-and-dash characters, which
+ * this pattern admits while rejecting traversal (`../`) and encoded sequences
+ * (`%2e%2e%2f`). The containment check in `filePath` is the second gate.
+ */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
+
+/** Reject any session id that could reach outside the sessions directory. */
+function assertSafeSessionId(sessionId: string): void {
+  if (!SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error(`Invalid session id: ${sessionId}`);
+  }
+}
 
 export class JsonSessionStore implements PersistentSessionStore {
   /** Root directory under which per-session files are written. */
@@ -70,10 +85,12 @@ export class JsonSessionStore implements PersistentSessionStore {
   }
 
   getSession(sessionId: string): LearningSession | undefined {
+    assertSafeSessionId(sessionId);
     return this.readFile(sessionId)?.session;
   }
 
   updateSession(sessionId: string, patch: SessionPatch): LearningSession {
+    assertSafeSessionId(sessionId);
     const file = this.requireFile(sessionId);
     const now = new Date().toISOString();
     const next = learningSessionSchema.parse({
@@ -88,18 +105,21 @@ export class JsonSessionStore implements PersistentSessionStore {
 
   appendTurn(turn: LearningTurn): void {
     const parsed = learningTurnSchema.parse(turn);
+    assertSafeSessionId(parsed.sessionId);
     const file = this.requireFile(parsed.sessionId);
     this.writeFile(parsed.sessionId, {
-      session: file.session,
+      session: { ...file.session, updatedAt: new Date().toISOString() },
       turns: [...file.turns, parsed],
     });
   }
 
   listTurns(sessionId: string): LearningTurn[] {
+    assertSafeSessionId(sessionId);
     return [...this.requireFile(sessionId).turns];
   }
 
   sessionDuration(sessionId: string): number {
+    assertSafeSessionId(sessionId);
     const session = this.requireFile(sessionId).session;
     const start = Date.parse(session.createdAt ?? new Date().toISOString());
     const end = Date.parse(session.completedAt ?? new Date().toISOString());
@@ -185,7 +205,12 @@ export class JsonSessionStore implements PersistentSessionStore {
   }
 
   private filePath(sessionId: string): string {
-    return join(this.sessionsDir, `${sessionId}.json`);
+    const path = join(this.sessionsDir, `${sessionId}.json`);
+    const root = resolve(this.sessionsDir) + sep;
+    if (!resolve(path).startsWith(root)) {
+      throw new Error(`Session id escapes the sessions directory: ${sessionId}`);
+    }
+    return path;
   }
 }
 
