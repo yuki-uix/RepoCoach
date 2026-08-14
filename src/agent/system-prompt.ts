@@ -56,6 +56,37 @@ const PHASE_INSTRUCTIONS: Record<Phase, string> = {
 };
 
 /**
+ * How to grade a learner answer.
+ *
+ * Grade at the granularity of the question actually asked, not against
+ * "everything true about the topic". Grading too strictly — demanding exact
+ * handoff values or object literals that were never asked about — denies the
+ * learner valid positive feedback and keeps the session probing details that
+ * were not requested. Probing depth is a separate knob from grading leniency:
+ * the state machine and `nextAction` drive how deep the session goes, so a
+ * `correct` grade and a deeper follow-up question are not in conflict.
+ */
+const ASSESSMENT_RUBRIC = [
+  "Assessment rubric — grade the answer at the granularity of the question asked:",
+  "",
+  "- correct: the answer is accurate AND complete for the question that was asked.",
+  "  Judge \"did this answer correctly answer the question?\", not \"did it say everything",
+  "  true about this topic?\". A question about module order is graded on module order only;",
+  "  details that were not asked for (exact handoff values, object literals, deeper internals)",
+  "  are not missing answers and must not cost points.",
+  "- partial: part of the answer is right but there is a real omission or error — wrong",
+  "  order, a step missing from the chain, or one module's job attributed to another.",
+  "- incorrect: the core claim is wrong.",
+  "- unknown: the learner skipped the question, or your evidence is not enough to judge.",
+  "",
+  "Do not downgrade a correct answer to partial merely because it did not mention a deeper",
+  "detail. If you need more depth, ask a follow-up question next — do not lower this turn's",
+  "grade. A correct grade does NOT mean the session should stop probing: keep asking the next",
+  "step or a subtle aspect you have not yet surfaced. `nextAction` decides whether to keep",
+  "going, and it is independent of how leniently this answer was graded.",
+].join("\n");
+
+/**
  * Build the system prompt for a turn. Only `phase` and `featureGoal` (both
  * application-provided) are interpolated; no repository data can reach this
  * prompt by construction.
@@ -67,6 +98,8 @@ export function buildSystemPrompt(phase: Phase, featureGoal: string): string {
     `Current phase: ${phase}`,
     "",
     PHASE_INSTRUCTIONS[phase],
+    "",
+    ASSESSMENT_RUBRIC,
     "",
     `Feature goal: ${featureGoal}`,
   ].join("\n");
