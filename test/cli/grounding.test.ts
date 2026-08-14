@@ -48,7 +48,7 @@ describe("CLI assembly", () => {
       config: { deepseekKey: "test-key" },
     });
     const repo = await asm.reader.importRepository(fixtureRoot);
-    const candidates = asm.candidateProvider.listCandidates(repo);
+    const candidates = await asm.candidateProvider.listCandidates(repo);
 
     expect(candidates.map((candidate) => candidate.id)).toEqual([
       "task-creation",
@@ -57,7 +57,7 @@ describe("CLI assembly", () => {
     ]);
   });
 
-  it("returns a single provisional candidate for a non-fixture repository", async () => {
+  it("generates a candidate from the entry file for a non-fixture repository", async () => {
     const dir = mkdtempSync(join(tmpdir(), "repocoach-other-"));
     mkdirSync(join(dir, "src"), { recursive: true });
     writeFileSync(join(dir, "src", "index.ts"), "export function main(): void {}\n", "utf8");
@@ -67,10 +67,9 @@ describe("CLI assembly", () => {
       config: { deepseekKey: "test-key" },
     });
     const repo = await asm.reader.importRepository(dir);
-    const candidates = asm.candidateProvider.listCandidates(repo);
+    const candidates = await asm.candidateProvider.listCandidates(repo);
 
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]?.id).toBe("provisional-entry-point");
+    expect(candidates.length).toBeGreaterThanOrEqual(1);
     expect(candidates[0]?.entryFiles).toEqual(["src/index.ts"]);
   });
 });

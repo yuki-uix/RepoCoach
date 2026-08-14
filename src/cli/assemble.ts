@@ -37,7 +37,7 @@ import { createReader, type Reader, type Repository } from "../reader/index.js";
 import { JsonSessionStore, type PersistentSessionStore } from "../store/index.js";
 import {
   FixtureCandidateProvider,
-  PlaceholderProvider,
+  GeneratedCandidateProvider,
   type CandidateProvider,
 } from "./candidates.js";
 
@@ -180,24 +180,24 @@ function buildDefaultProvider(deps: AssembleDeps, repoRoot: string): ChatProvide
 
 /**
  * Route candidate generation: a local path under the RepoCoach `fixtures/`
- * directory uses the pre-authored fixture candidates; anything else gets the
- * provisional single candidate.
+ * directory uses the pre-authored fixture candidates; anything else gets real
+ * generation (heuristic by default).
  */
 function defaultCandidateProvider(reader: Reader, repoRoot: string): CandidateProvider {
   const fixture = new FixtureCandidateProvider(
     join(repoRoot, "fixtures", "expectations", "feature-candidates.json"),
   );
-  const placeholder = new PlaceholderProvider(reader);
+  const generated = new GeneratedCandidateProvider(reader);
   const fixturesRoot = resolve(repoRoot, "fixtures");
   return {
-    listCandidates(repo) {
+    async listCandidates(repo, scope) {
       if (
         repo.source.kind === "local" &&
         resolve(repo.source.path).startsWith(fixturesRoot + sep)
       ) {
         return fixture.listCandidates();
       }
-      return placeholder.listCandidates(repo);
+      return generated.listCandidates(repo, scope);
     },
   };
 }

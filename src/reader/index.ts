@@ -77,11 +77,20 @@ export function createReader(options: ReaderOptions): Reader {
   return {
     async importRepository(input, ref) {
       const source = parseRepoUrl(input);
-      const { rootDir, sha } = await cloneRepo(source, {
-        cacheRoot,
-        ref,
-        git: options.git,
-      });
+      let rootDir: string;
+      let sha: string;
+      try {
+        ({ rootDir, sha } = await cloneRepo(source, {
+          cacheRoot,
+          ref,
+          git: options.git,
+        }));
+      } catch (error) {
+        if (source.kind === "github") {
+          throw friendlyCloneError(source, error);
+        }
+        throw error;
+      }
       const meta =
         source.kind === "github"
           ? await getRepoMeta(source.owner, source.name, {
@@ -114,6 +123,27 @@ export function createReader(options: ReaderOptions): Reader {
   };
 }
 
+/**
+ * Map a GitHub clone failure to a clear, credential-safe user error.
+ *
+ * A private / nonexistent repository surfaces as a `git … failed: <stderr>`
+ * subprocess error (auth prompt, 404, …). That raw stderr can echo a token or
+ * other credentials, so it is never passed through — the public message names
+ * the repository and the "public repos only" constraint instead. Ref-validation
+ * and "could not resolve ref" errors are already clear and are kept verbatim.
+ */
+function friendlyCloneError(
+  source: Extract<ParsedRepoUrl, { kind: "github" }>,
+  error: unknown,
+): Error {
+  if (error instanceof Error && /^git /.test(error.message)) {
+    return new Error(
+      `仓库不存在或非公开：https://github.com/${source.owner}/${source.name}（RepoCoach 只支持公开仓库）`,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 export { parseRepoUrl } from "./url.js";
 export { cloneRepo } from "./clone.js";
 export { resolveInRepo } from "./fs-guard.js";
@@ -121,7 +151,7 @@ export * from "./filters.js";
 export { getTree } from "./tree.js";
 export { searchRepo } from "./search.js";
 export { readFileSlice } from "./read-file.js";
-export { getPackageInfo } from "./package-info.js";
+export { extractEntryPoints, getPackageInfo } from "./package-info.js";
 export { getRepoMeta } from "./github-meta.js";
 
 export type { ParsedRepoUrl } from "./url.js";

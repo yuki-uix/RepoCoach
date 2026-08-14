@@ -13,14 +13,23 @@ import type { Readable, Writable } from "node:stream";
 import type { FeatureCandidate } from "../domain/index.js";
 import { resumeSession } from "../store/index.js";
 import type { Repository } from "../reader/index.js";
+import {
+  buildRepositoryImport,
+  type RepositoryImport,
+  type WorkspaceInfo,
+} from "../import/index.js";
 import { assembleSession, type AssembleDeps, type SessionAssembly } from "./assemble.js";
 import { lastFeedback, renderRecap, formatDuration } from "./recap.js";
 import { SessionRunner, type EventTarget, type PromptFn } from "./session-runner.js";
+import type { CandidateScope } from "./candidates.js";
 
 export { assembleSession, DEFAULT_DATA_DIR } from "./assemble.js";
 export type { AssembleDeps, SessionAssembly } from "./assemble.js";
-export { FixtureCandidateProvider, PlaceholderProvider } from "./candidates.js";
-export type { CandidateProvider } from "./candidates.js";
+export {
+  FixtureCandidateProvider,
+  GeneratedCandidateProvider,
+} from "./candidates.js";
+export type { CandidateProvider, CandidateScope } from "./candidates.js";
 export { SessionRunner } from "./session-runner.js";
 export type { RunOutcome, RunOutcomePhase } from "./session-runner.js";
 export {
@@ -107,7 +116,11 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
     // API key fails the start before any session file is written — a failed
     // start must never leave an empty active session behind.
     void asm.provider;
-    const candidates = asm.candidateProvider.listCandidates(repo);
+    const repoImport = buildRepositoryImport(asm.reader, repo);
+    showImportSummary(asm.stdout, repoImport);
+    showImportWarnings(asm.stderr, repoImport);
+    const scope = await selectWorkspace(repoImport.workspaces, prompt.question, asm.stdout);
+    const candidates = await asm.candidateProvider.listCandidates(repo, scope);
     const candidate = await selectCandidate(candidates, prompt.question, asm.stdout);
     const session = asm.store.createSession({
       repositoryId: repositoryIdWithSha(repo),
@@ -140,7 +153,7 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
         );
       }
     }
-    const candidates = asm.candidateProvider.listCandidates(repo);
+    const candidates = await asm.candidateProvider.listCandidates(repo);
     const goal = resolveFeatureGoal(candidates, resumed.session.featureId);
     const runner = buildRunner(asm, repo, resumed.sessionId, goal, prompt.question);
     const outcome = await runner.run();
@@ -259,6 +272,60 @@ async function selectCandidate(
     throw new Error(`Invalid selection: "${trimmed}"`);
   }
   return candidates[index - 1]!;
+}
+
+/** Show the imported repository's basic information (docs/mvp-spec.md §5.1). */
+function showImportSummary(stdout: Writable, imp: RepositoryImport): void {
+  stdout.write(`仓库: ${imp.packageInfo?.name ?? repositoryIdFromRepo(imp.repo)}\n`);
+  stdout.write(`文件数: ${imp.tree.length}\n`);
+  if (imp.entryCandidates.length > 0) {
+    stdout.write(`入口候选: ${imp.entryCandidates.join(", ")}\n`);
+  }
+  if (imp.workspaces.length > 0) {
+    stdout.write("Workspaces:\n");
+    for (const workspace of imp.workspaces) {
+      stdout.write(
+        `  - ${workspace.path}${workspace.name !== undefined ? ` (${workspace.name})` : ""}\n`,
+      );
+    }
+  }
+}
+
+/** Surface non-fatal import observations (empty repo, missing package.json). */
+function showImportWarnings(stderr: Writable, imp: RepositoryImport): void {
+  for (const warning of imp.warnings) {
+    stderr.write(`Warning: ${warning}\n`);
+  }
+  if (imp.packageError !== undefined) {
+    stderr.write(`Warning: ${imp.packageError}\n`);
+  }
+}
+
+/** For monorepos, ask the user to pick one workspace; otherwise scope to none. */
+async function selectWorkspace(
+  workspaces: WorkspaceInfo[],
+  prompt: PromptFn,
+  stdout: Writable,
+): Promise<CandidateScope> {
+  if (workspaces.length === 0) {
+    return {};
+  }
+  stdout.write("检测到 monorepo，请选择要学习的 workspace:\n");
+  workspaces.forEach((workspace, index) => {
+    stdout.write(
+      `  ${index + 1}. ${workspace.path}${workspace.name !== undefined ? ` (${workspace.name})` : ""}\n`,
+    );
+  });
+  const line = await prompt(`选择编号 (1-${workspaces.length}): `);
+  const trimmed = line.trim();
+  if (trimmed === "") {
+    return { workspacePath: workspaces[0]!.path };
+  }
+  const index = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(index) || index < 1 || index > workspaces.length) {
+    throw new Error(`Invalid selection: "${trimmed}"`);
+  }
+  return { workspacePath: workspaces[index - 1]!.path };
 }
 
 function featureGoal(candidate: FeatureCandidate): string {
