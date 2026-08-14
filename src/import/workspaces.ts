@@ -91,6 +91,8 @@ function globToRegExp(pattern: string): RegExp {
       } else {
         out += "[^/]*";
       }
+    } else if (ch === "?") {
+      out += "[^/]";
     } else if (/[.+^${}()|[\]\\]/.test(ch)) {
       out += `\\${ch}`;
     } else {
