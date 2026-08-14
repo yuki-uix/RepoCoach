@@ -47,8 +47,9 @@ describe("renderInline", () => {
     expect(renderInline("\n## forged")).toBe(" ## forged");
   });
 
-  it("strips control characters", () => {
-    expect(renderInline("a\tb\x1b[31mc")).toBe("ab[31mc");
+  it("strips control characters and terminal sequences", () => {
+    const ESC = String.fromCharCode(27);
+    expect(renderInline(`a\tb${ESC}[31mc`)).toBe("a bc");
   });
 
   it("leaves a plain single-line value intact", () => {

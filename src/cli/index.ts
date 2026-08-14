@@ -49,7 +49,7 @@ export {
   renderRecap,
   splitFeedback,
 } from "./recap.js";
-export { neutralizeMarkdown, renderInline, renderUntrustedBlock } from "./markdown.js";
+export { neutralizeMarkdown, renderInline, renderUntrustedBlock, stripTerminalControls } from "./markdown.js";
 export { renderSessionShow } from "./show.js";
 export type { ShowDeps } from "./show.js";
 

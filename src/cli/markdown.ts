@@ -16,6 +16,17 @@
  * mistaken for a RepoCoach heading. There is deliberately no markdown escaping
  * or code-fence wrapping — a ``` fence is inert text in a terminal.
  *
+ * A terminal is also an output channel that *interprets* control sequences: an
+ * ESC byte followed by `[` (CSI), `]` (OSC) or any other character is a cursor
+ * / clear-screen / hyperlink command that hostile repo source or a model string
+ * could smuggle in (`ESC[2J` clears the screen, `ESC]8;;…` opens a hyperlink).
+ * Every byte written to the terminal therefore flows through
+ * `stripTerminalControls` first: it removes whole ESC-led sequences plus the
+ * remaining C0 controls and DEL, keeping only `\n` (multi-line blocks need it)
+ * and folding `\t` to a space. Untrusted text is stripped *before* any of our
+ * own dim/bold styles are applied, so our styles survive while injected
+ * sequences do not.
+ *
  * Every interpolated value in the render layer is untrusted by default — there
  * is deliberately no whitelist of "safe-looking" fields. A path comes from a
  * model tool argument, a repository id from a user-chosen directory name, a
@@ -44,14 +55,104 @@ export function bold(text: string): string {
 }
 
 /**
- * Neutralize `#` headings in untrusted flowing text so they cannot forge a
- * RepoCoach section heading. A single leading space is added before a hash run
- * at column 0 (rather than a backslash escape) — enough to knock it off the
- * top level without the `\#` noise. `##NoSpace` (no whitespace after the
- * hashes) and a seven-hash run are not headings and are left alone.
+ * Strip terminal control sequences from untrusted text.
+ *
+ * The terminal interprets ESC-led sequences (CSI `ESC[`, OSC `ESC]`, and the
+ * single-character `ESC` forms) as cursor / clear / hyperlink commands, so a
+ * hostile string must not be able to smuggle one through. This removes each
+ * whole ESC-led sequence, then drops every remaining C0 control and DEL, while
+ * preserving `\n` (multi-line blocks need line breaks) and folding `\t` to a
+ * single space so a tab cannot derail a fixed-width indent. Implemented as a
+ * character loop rather than a control-character regex (eslint
+ * no-control-regex). Every untrusted string bound for stdout/stderr must pass
+ * through here before any of our own dim/bold styles are applied.
+ */
+export function stripTerminalControls(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const code = text.charCodeAt(i);
+    if (code === 0x1b) {
+      // ESC begins a control sequence — consume it (and the sequence) whole.
+      i += 1;
+      if (i >= text.length) {
+        break;
+      }
+      const next = text.charCodeAt(i);
+      if (next === 0x5b) {
+        // CSI: ESC [ parameter/intermediate bytes … final byte 0x40–0x7e.
+        i += 1;
+        while (i < text.length) {
+          const c = text.charCodeAt(i);
+          if (c >= 0x40 && c <= 0x7e) {
+            break;
+          }
+          i += 1;
+        }
+        if (i < text.length) {
+          i += 1; // consume the final byte
+        }
+      } else if (next === 0x5d) {
+        // OSC: ESC ] … terminated by BEL (0x07) or ST (ESC \).
+        i += 1;
+        while (i < text.length) {
+          const c = text.charCodeAt(i);
+          if (c === 0x07) {
+            i += 1; // consume the BEL terminator
+            break;
+          }
+          if (c === 0x1b && i + 1 < text.length && text.charCodeAt(i + 1) === 0x5c) {
+            i += 2; // consume the ST (ESC \) terminator
+            break;
+          }
+          i += 1;
+        }
+      } else if (next >= 0x20 && next <= 0x2f) {
+        // ESC + intermediate byte(s) … final byte 0x30–0x7e (e.g. ESC ( B).
+        i += 1;
+        while (i < text.length) {
+          const c = text.charCodeAt(i);
+          if (c >= 0x30 && c <= 0x7e) {
+            break;
+          }
+          i += 1;
+        }
+        if (i < text.length) {
+          i += 1; // consume the final byte
+        }
+      } else {
+        // ESC + a single trailing character (e.g. ESC 7, ESC 8, ESC c).
+        i += 1;
+      }
+      continue;
+    }
+    if (code === 0x0a) {
+      out += "\n";
+    } else if (code === 0x09) {
+      out += " ";
+    } else if (code >= 0x20 && code !== 0x7f) {
+      out += text[i]!;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Neutralize untrusted flowing text before it reaches the terminal.
+ *
+ * `stripTerminalControls` first removes any ESC-led control sequence and the
+ * remaining C0 controls / DEL, keeping `\n` so multi-line flowing text survives
+ * and folding `\t` to a space. Then a single leading space is added before a
+ * hash run at column 0 (rather than a backslash escape) — enough to knock it
+ * off the top level without the `\#` noise. `##NoSpace` (no whitespace after
+ * the hashes) and a seven-hash run are not headings and are left alone.
  */
 export function neutralizeMarkdown(text: string): string {
-  return text.replace(/^(#{1,6})(?=\s)/gm, (_match, hashes: string) => ` ${hashes}`);
+  return stripTerminalControls(text).replace(
+    /^(#{1,6})(?=\s)/gm,
+    (_match, hashes: string) => ` ${hashes}`,
+  );
 }
 
 /**
@@ -61,35 +162,27 @@ export function neutralizeMarkdown(text: string): string {
  * id, a phase — anything rendered into one line of output) must never receive
  * a multi-line value: an embedded `\n` would let the next line sit at column 0
  * and forge a RepoCoach heading. Newlines collapse to a single space first (so
- * a marker split across lines is still caught), other control characters are
- * stripped, and the result is then neutralized like any other untrusted text.
+ * a marker split across lines is still caught), then the value shares the same
+ * terminal-control stripping + heading neutralization gate as flowing text.
  * Same idea as data-guard's sanitizeHeaderValue. Callers must route every
  * interpolated value through here — no whitelist of "safe-looking" fields.
  */
 export function renderInline(value: string | number): string {
   const text = typeof value === "number" ? String(value) : value;
   const singleLine = text.replace(/[\r\n]+/g, " ");
-  // Strip the remaining C0 controls and DEL (0x00–0x1f, 0x7f) without a
-  // control-character regex (eslint no-control-regex): a hostile value could
-  // otherwise smuggle an ANSI escape or a tab into a single-line slot.
-  let stripped = "";
-  for (const ch of singleLine) {
-    const code = ch.charCodeAt(0);
-    if (code >= 0x20 && code !== 0x7f) {
-      stripped += ch;
-    }
-  }
-  return neutralizeMarkdown(stripped);
+  return neutralizeMarkdown(singleLine);
 }
 
 /**
  * Render an untrusted multi-line source block indented behind `│ ` and dimmed.
- * Every line carries the prefix, so an internal `## …` heading or ``` fence
- * cannot sit at column 0 and be confused with RepoCoach's own output.
+ * Terminal control sequences are stripped first (before the dim style is
+ * applied), then every line carries the prefix, so an internal `## …` heading
+ * or ``` fence cannot sit at column 0 and be confused with RepoCoach's own
+ * output.
  */
 export function renderUntrustedBlock(content: string): string {
   return dim(
-    content
+    stripTerminalControls(content)
       .split("\n")
       .map((line) => `${BLOCK_PREFIX}${line}`)
       .join("\n"),

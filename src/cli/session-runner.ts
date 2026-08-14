@@ -14,7 +14,7 @@ import type { AgentDecision, Evidence } from "../domain/index.js";
 import type { AgentLoopEvent } from "../agent/index.js";
 import { Orchestrator, type StepResult } from "../orchestrator/orchestrator.js";
 import type { SessionStore } from "../store/index.js";
-import { bold, dim, neutralizeMarkdown, renderInline } from "./markdown.js";
+import { bold, dim, neutralizeMarkdown, renderInline, stripTerminalControls } from "./markdown.js";
 
 /** Reads one line of user input (the readline `question` seam). */
 export type PromptFn = (query: string) => Promise<string>;
@@ -246,7 +246,7 @@ function formatToolArgs(name: string, argumentsJson: string): string {
 }
 
 function summarize(text: string): string {
-  return truncate(text.replace(/\s+/g, " ").trim(), RESULT_LINE_WIDTH);
+  return truncate(stripTerminalControls(text).replace(/\s+/g, " ").trim(), RESULT_LINE_WIDTH);
 }
 
 function truncate(text: string, width: number): string {
