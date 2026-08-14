@@ -364,7 +364,7 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
         return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
       }
       // After a question was asked, the loop throws (no valid decision).
-      throw new AgentDecisionInvalidError("no decision");
+      throw new AgentDecisionInvalidError("no decision", USAGE);
     });
     const { orchestrator, sessionId } = makeOrchestrator(agent);
 
@@ -381,7 +381,7 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
 
   it("abandons with error when the agent fails before any content exists", async () => {
     const { agent } = stubAgent(() => {
-      throw new AgentDecisionInvalidError("no decision");
+      throw new AgentDecisionInvalidError("no decision", USAGE);
     });
     const { orchestrator, sessionId } = makeOrchestrator(agent);
 
@@ -391,6 +391,37 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     expect(result.decision).toBeNull();
     expect(store.getSession(sessionId)?.phase).toBe("error");
     expect(store.getSession(sessionId)?.status).toBe("abandoned");
+  });
+
+  it("counts the usage of a failed agent call into the session total", async () => {
+    const failedUsage: TokenUsage = { inputTokens: 400, outputTokens: 200 };
+    const { agent } = stubAgent(() => {
+      throw new AgentDecisionInvalidError("no decision", failedUsage);
+    });
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
+
+    const result = await orchestrator.step(); // orientation, loop throws
+
+    expect(result.phase).toBe("error");
+    expect(orchestrator.accumulatedUsage).toEqual(failedUsage);
+    expect(store.getSession(sessionId)?.usage).toEqual(failedUsage);
+  });
+
+  it("still flags the budget as exceeded when a failed call alone overspends", async () => {
+    const { agent } = stubAgent(() => {
+      throw new AgentDecisionInvalidError("no decision", {
+        inputTokens: DEFAULT_BUDGET.maxInputTokens + 1,
+        outputTokens: 0,
+      });
+    });
+    const { orchestrator } = makeOrchestrator(agent);
+
+    const result = await orchestrator.step(); // orientation, loop throws
+
+    // The failed call spent past the budget, so the over-budget flag must not
+    // be dropped just because no valid decision came back.
+    expect(result.phase).toBe("error");
+    expect(result.budgetExceeded).toBe(true);
   });
 
   it("lets the rules overrule an illegal nextAction suggestion", async () => {

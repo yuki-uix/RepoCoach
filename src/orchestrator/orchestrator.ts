@@ -70,14 +70,12 @@ export interface OrchestratorOptions {
 
 const DEFAULT_MAX_TURNS = 5;
 /**
- * Default per-session token budget. The values are measured from two complete
- * real-model smoke runs: a skip-heavy session used 121,972 input / 20,997 output
- * tokens (4 questions), and a session that gave 5 substantive answers used
- * 199,241 input / 43,817 output (4 questions, hitting the old 40k output cap and
- * forced to converge early). The latter projects to ~50k input / ~11k output per
- * question, so a full 5-question run needs ~250k input / ~55k output; these
- * limits leave headroom above that. Cost grows linearly with turns because of
- * cross-turn re-reads (issue #25).
+ * Default per-session token budget. Measured from real-model smoke runs: two
+ * 4-question sessions consumed 121,972 input / 20,997 output and 199,241 input
+ * / 43,817 output tokens (both hit the then-current output cap and were forced
+ * to converge early), and a complete 5-question run measured 235,399 input /
+ * 53,720 output. These limits leave headroom above that measured full run. Cost
+ * grows linearly with turns because of cross-turn re-reads (issue #25).
  */
 export const DEFAULT_BUDGET: TokenBudget = {
   maxInputTokens: 320_000,
@@ -269,8 +267,13 @@ export class Orchestrator {
         });
       } catch (error) {
         // The real AgentLoop throws once its own retries are exhausted; there
-        // is nothing a further Orchestrator-level retry could recover.
+        // is nothing a further Orchestrator-level retry could recover. The
+        // failed call still spent provider tokens, so fold them into the
+        // running total before degrading — otherwise a burst of failures would
+        // under-count usage and let the budget check be bypassed.
         if (error instanceof AgentDecisionInvalidError) {
+          this.usage.inputTokens += error.usage.inputTokens;
+          this.usage.outputTokens += error.usage.outputTokens;
           return null;
         }
         throw error;

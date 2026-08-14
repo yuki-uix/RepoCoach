@@ -49,11 +49,17 @@ import {
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
 
-/** Thrown when the model never produces a schema-valid decision. */
+/**
+ * Thrown when the model never produces a schema-valid decision. Carries the
+ * provider usage the loop accumulated before failing, so the caller can still
+ * count tokens a failed call actually spent (failed calls cost real tokens).
+ */
 export class AgentDecisionInvalidError extends Error {
-  constructor(message: string) {
+  readonly usage: TokenUsage;
+  constructor(message: string, usage: TokenUsage) {
     super(message);
     this.name = "AgentDecisionInvalidError";
+    this.usage = usage;
   }
 }
 
@@ -182,6 +188,7 @@ export class AgentLoop {
       if (decisionRetries > this.maxDecisionRetries) {
         throw new AgentDecisionInvalidError(
           `Decision failed validation after ${this.maxDecisionRetries} retries: ${message}`,
+          usage,
         );
       }
       this.emit({ type: "tool_result", name: "submit_decision", result: message });
@@ -212,6 +219,7 @@ export class AgentLoop {
         if (forceDecision) {
           throw new AgentDecisionInvalidError(
             "Model produced plain text instead of submit_decision at the tool-call limit",
+            usage,
           );
         }
         messages.push({ role: "user", content: PLAIN_TEXT_NUDGE });
@@ -277,6 +285,7 @@ export class AgentLoop {
 
     throw new AgentDecisionInvalidError(
       `Agent loop exceeded ${maxRounds} rounds without a valid decision`,
+      usage,
     );
   }
 

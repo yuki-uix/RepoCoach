@@ -243,14 +243,18 @@ async function finishSession(
   prompt: PromptFn,
 ): Promise<number> {
   if (outcome.phase === "abandoned") {
+    // `/quit` marks the session abandoned, which `resumeSession` rejects — a
+    // resume hint here would send the user down a path that always fails.
     asm.stdout.write(
-      `\nSession ${sessionId} 已标记 abandoned。可用 repocoach resume ${sessionId} 恢复。\n`,
+      `\nSession ${sessionId} 已标记 abandoned，无法再恢复。可用 repocoach list 查看历史，或 repocoach start 重新开始。\n`,
     );
     return 0;
   }
   if (outcome.phase === "error") {
+    // The session is in a terminal phase, so `resumeSession` refuses it; point
+    // the user at the persisted evidence instead of a resume that cannot work.
     asm.stderr.write(
-      `Session ${sessionId} 进入 error 状态，无法完成复盘。可用 repocoach resume ${sessionId} 恢复。\n`,
+      `Session ${sessionId} 进入 error 状态，无法继续。可用 repocoach list 查看已保存的部分证据，或 repocoach start 重新开始新的学习。\n`,
     );
     return 1;
   }
