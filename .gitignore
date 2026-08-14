@@ -13,6 +13,8 @@ coverage/
 .DS_Store
 *.log
 
+eval-report.json
+
 .pi/sessions/
 .pi/cache/
 

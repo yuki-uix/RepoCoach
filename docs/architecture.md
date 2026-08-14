@@ -236,6 +236,8 @@ Review checklist：改动引入新的输出/保存路径时，diff 里必须能�
 - Session completion：用户是否能完成一条链路；
 - 单 Session 成本与耗时：token 用量和 wall-clock 时间，守住 15 分钟目标。
 
+`src/eval/`（`pnpm eval:mock` / `pnpm eval:real`）把指标自动化，并明确分成两种测量：**活会话 eval**（Evidence precision、Path accuracy、Adaptation、Hallucination rate、单 Session 成本与耗时）与 **judge 模式**（Assessment 一致率）。活会话里模型会自己生成问题，无法按回答文本与标注配对——一致率是**评判函数**的属性，必须在 judge 模式下隔离测量：把每条标注样本的 (question, userAnswer) 原样交给评判函数（复用真实 system prompt 与 rubric、允许只读工具检索证据），只输出 assessment 再与标注比对。mock 模式用确定性脚本化 provider 走真实装配路径（含强制接地），CI 无 API key 也可运行；real 模式用 DeepSeek provider 产出真实数值。Question relevance 与 Session completion 尚未独立成指标——Session completion 由报告中的 `endedPhase` / `degraded` 字段部分覆盖。
+
 ## 8. 实施顺序
 
 第一阶段（CLI 垂直切片，验证核心假设）：
