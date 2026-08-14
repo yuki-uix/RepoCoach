@@ -9,6 +9,7 @@
  * See docs/architecture.md §3–§5.
  */
 
+import { AgentDecisionInvalidError } from "../agent/index.js";
 import {
   agentDecisionSchema,
   type AgentDecision,
@@ -68,9 +69,17 @@ export interface OrchestratorOptions {
 }
 
 const DEFAULT_MAX_TURNS = 5;
-const DEFAULT_BUDGET: TokenBudget = {
-  maxInputTokens: 200_000,
-  maxOutputTokens: 20_000,
+/**
+ * Default per-session token budget. Measured from real-model smoke runs: two
+ * 4-question sessions consumed 121,972 input / 20,997 output and 199,241 input
+ * / 43,817 output tokens (both hit the then-current output cap and were forced
+ * to converge early), and a complete 5-question run measured 235,399 input /
+ * 53,720 output. These limits leave headroom above that measured full run. Cost
+ * grows linearly with turns because of cross-turn re-reads (issue #25).
+ */
+export const DEFAULT_BUDGET: TokenBudget = {
+  maxInputTokens: 320_000,
+  maxOutputTokens: 70_000,
 };
 const MAX_DECISION_RETRIES = 2;
 
@@ -134,19 +143,11 @@ export class Orchestrator {
 
     const invocation = await this.invokeWithRetry(phase, session, input);
     if (invocation === null) {
-      // The agent never produced a schema-valid decision. Give up.
-      this.store.updateSession(this.sessionId, {
-        phase: "error",
-        status: "abandoned",
-        usage: this.accumulatedUsage,
-      });
-      return {
-        phase: "error",
-        decision: null,
-        decisionOverridden: false,
-        turn: null,
-        budgetExceeded: this.isBudgetExceeded(),
-      };
+      // The agent never produced a schema-valid decision. If the session
+      // already has something worth recapping, salvage a minimal recap instead
+      // of throwing the learner's work away; otherwise abandon with a resume
+      // hint (see the finishSession error message).
+      return this.degrade();
     }
     const { decision } = invocation;
 
@@ -198,6 +199,52 @@ export class Orchestrator {
   }
 
   /**
+   * Handle the agent never producing a valid decision: salvage a minimal recap
+   * when the session already has evidence or posed questions, otherwise abandon
+   * the session. Either way the learner keeps whatever was persisted.
+   */
+  private degrade(): StepResult {
+    const turns = this.store.listTurns(this.sessionId);
+    const hasContent = turns.some(
+      (turn) => turn.question.trim() !== "" || turn.evidence.length > 0,
+    );
+    if (!hasContent) {
+      this.store.updateSession(this.sessionId, {
+        phase: "error",
+        status: "abandoned",
+        usage: this.accumulatedUsage,
+      });
+      return {
+        phase: "error",
+        decision: null,
+        decisionOverridden: false,
+        turn: null,
+        budgetExceeded: this.isBudgetExceeded(),
+      };
+    }
+    // Record the degradation as a turn so it persists with the session, then
+    // close out as a completed (degraded) recap. `renderRecap` ignores a
+    // question-only turn, so it does not pollute the sections.
+    this.store.appendTurn({
+      sessionId: this.sessionId,
+      question: "Session 降级：模型未能产出有效决策，本次复盘由已保存证据合成。",
+      evidence: [],
+    });
+    this.store.updateSession(this.sessionId, {
+      phase: "recap",
+      status: "completed",
+      usage: this.accumulatedUsage,
+    });
+    return {
+      phase: "recap",
+      decision: null,
+      decisionOverridden: true,
+      turn: null,
+      budgetExceeded: this.isBudgetExceeded(),
+    };
+  }
+
+  /**
    * Call the agent and zod-validate the returned decision. Invalid decisions
    * are retried up to `MAX_DECISION_RETRIES` times; if none validates, return
    * null and the caller transitions to the `error` phase. Token usage is
@@ -209,13 +256,28 @@ export class Orchestrator {
     input: RunInput,
   ): Promise<{ decision: AgentDecision } | null> {
     for (let attempt = 0; attempt <= MAX_DECISION_RETRIES; attempt++) {
-      const result = await this.agent({
-        phase,
-        featureGoal: this.featureGoal,
-        turnHistory: this.store.listTurns(session.id),
-        userAnswer: input.userAnswer,
-        skipped: input.skip,
-      });
+      let result: AgentInvocation;
+      try {
+        result = await this.agent({
+          phase,
+          featureGoal: this.featureGoal,
+          turnHistory: this.store.listTurns(session.id),
+          userAnswer: input.userAnswer,
+          skipped: input.skip,
+        });
+      } catch (error) {
+        // The real AgentLoop throws once its own retries are exhausted; there
+        // is nothing a further Orchestrator-level retry could recover. The
+        // failed call still spent provider tokens, so fold them into the
+        // running total before degrading — otherwise a burst of failures would
+        // under-count usage and let the budget check be bypassed.
+        if (error instanceof AgentDecisionInvalidError) {
+          this.usage.inputTokens += error.usage.inputTokens;
+          this.usage.outputTokens += error.usage.outputTokens;
+          return null;
+        }
+        throw error;
+      }
       this.usage.inputTokens += result.usage.inputTokens;
       this.usage.outputTokens += result.usage.outputTokens;
 
@@ -269,8 +331,10 @@ function resolveStep(
       if (input.userAnswer !== undefined) {
         return advance(phase, { type: "user_answered" });
       }
-      // No answer yet: the agent is posing the prediction question.
-      return { phase, askedQuestion: true, overridden: nextAction !== "ask" };
+      // No answer yet: the session stays in hypothesis. A non-empty question
+      // in the decision is posed to the user (whatever the nextAction) and so
+      // counts as a turn; a question-less suggestion is overruled and does not.
+      return { phase, askedQuestion: hasQuestion(decision), overridden: nextAction !== "ask" };
     }
 
     case "trace": {
@@ -309,7 +373,7 @@ function resolveStep(
           overridden: true,
         };
       }
-      return { phase, askedQuestion: true, overridden: nextAction !== "ask" };
+      return { phase, askedQuestion: hasQuestion(decision), overridden: nextAction !== "ask" };
     }
 
     case "feedback":
@@ -321,14 +385,27 @@ function resolveStep(
           overridden: true,
         };
       }
+      // Probing deeper poses a fresh question immediately after this transition
+      // (the runner shows it right away), so any non-empty question must count
+      // toward the turn limit — regardless of the nextAction. A question-less
+      // non-finish suggestion is overruled.
       return nextAction === "finish"
         ? advance(phase, { type: "chain_complete" })
-        : advance(phase, { type: "continue_probing" });
+        : {
+            phase: transition(phase, { type: "continue_probing" }),
+            askedQuestion: hasQuestion(decision),
+            overridden: nextAction !== "ask",
+          };
 
     default:
       // recap / error are terminal; run() guards against them.
       throw new Error(`Unexpected phase "${phase}"`);
   }
+}
+
+/** True when a decision carries a non-empty question to pose to the user. */
+function hasQuestion(decision: AgentDecision): boolean {
+  return decision.question !== undefined && decision.question.trim() !== "";
 }
 
 function advance(phase: Phase, event: OrchestratorEvent): ResolveResult {

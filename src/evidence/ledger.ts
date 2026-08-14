@@ -33,6 +33,21 @@ export class ToolReturnLedger {
   }
 
   /**
+   * True when this exact (path, inclusive line range) was already recorded this
+   * turn. The read tool uses this to suppress a re-read of a range the model
+   * has already seen (issue #23, token waste).
+   */
+  hasRead(path: string, startLine: number, endLine: number): boolean {
+    const normalized = normalizePath(path);
+    return this.ranges.some(
+      (range) =>
+        range.path === normalized &&
+        range.startLine === startLine &&
+        range.endLine === endLine,
+    );
+  }
+
+  /**
    * True when `claim`'s (path, [startLine, endLine]) is fully contained in one
    * recorded range for the same path. A claim spanning two records is rejected
    * even when the records are adjacent (no range merging).

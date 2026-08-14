@@ -7,12 +7,32 @@
  * aborts the loop. repo_save_evidence validates each claim through the
  * injectable EvidenceValidator (default: accept everything; issue #5 swaps in
  * constructive grounding) and appends accepted claims to the turn's list.
+ *
+ * Byte-cap coverage (§6 "同一道闸覆盖所有出口"): every string an executor
+ * returns to the model is bounded by MAX_TOOL_RESULT_BYTES.
+ *
+ * - repo_get_tree   → truncateBytes over the file listing (+ note when cut)
+ * - repo_search     → per-match whole-line truncation (+ note), recorder only
+ *                     sees the lines actually shown
+ * - repo_read_file  → fitSourceLines over the numbered content, with header and
+ *                     truncation-note bytes reserved up front (+ note)
+ * - repo_get_package_info → truncateBytes over the JSON summary (+ note)
+ * - repo_save_evidence → truncateBytes over the receipt / rejection string
+ * - the outer catch → truncateBytes over `Error: <message>`; the small
+ *                     schema-error / unknown-tool strings are constant-bounded
  */
 
 import { z } from "zod";
 import { evidenceSchema, type Evidence } from "../domain/index.js";
-import type { Repository, Reader } from "../reader/index.js";
+import type { Repository, Reader, SearchMatch } from "../reader/index.js";
 import { formatZodError } from "./errors.js";
+import {
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
+  fitSourceLines,
+  lineNumberPrefix,
+  truncateBytes,
+} from "./limits.js";
 import type { ToolDefinition } from "./provider.js";
 
 export interface EvidenceValidator {
@@ -35,6 +55,8 @@ export const acceptAllEvidence: EvidenceValidator = {
  */
 export interface ReturnRecorder {
   record(path: string, startLine: number, endLine: number): void;
+  /** True when this exact (path, inclusive line range) was already returned this turn. */
+  hasRead?(path: string, startLine: number, endLine: number): boolean;
 }
 
 export interface ToolRuntime {
@@ -157,7 +179,8 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
     try {
       return await executeTool(runtime, validator, execution);
     } catch (error) {
-      return `Error: ${error instanceof Error ? error.message : String(error)}`;
+      const message = `Error: ${error instanceof Error ? error.message : String(error)}`;
+      return truncateBytes(message, MAX_TOOL_RESULT_BYTES).text;
     }
   }
 
@@ -184,7 +207,13 @@ function executeTool(
       if (entries.length === 0) {
         return "(no readable files)";
       }
-      return entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
+      const listing = entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
+      if (byteLength(listing) <= MAX_TOOL_RESULT_BYTES) {
+        return listing;
+      }
+      const note = `\n(结果已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用 repo_search 定位具体文件)`;
+      const capped = truncateBytes(listing, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      return `${capped.text}${note}`;
     }
 
     case "repo_search": {
@@ -205,7 +234,13 @@ function executeTool(
 
     case "repo_get_package_info": {
       const info = runtime.reader.getPackageInfo(runtime.repo);
-      return JSON.stringify(info, null, 2);
+      const text = JSON.stringify(info, null, 2);
+      if (byteLength(text) <= MAX_TOOL_RESULT_BYTES) {
+        return text;
+      }
+      const note = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，脚本 ${info.scripts.length} 个、依赖 ${info.dependencies.length} 个)`;
+      const capped = truncateBytes(text, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      return `${capped.text}${note}`;
     }
 
     case "repo_save_evidence": {
@@ -215,11 +250,17 @@ function executeTool(
       }
       const verdict = validator.validate(parsed.data);
       if (!verdict.ok) {
-        return `Error: evidence rejected: ${verdict.reason}`;
+        return truncateBytes(
+          `Error: evidence rejected: ${verdict.reason}`,
+          MAX_TOOL_RESULT_BYTES,
+        ).text;
       }
       execution.collectedEvidence.push(parsed.data);
       const evidence = parsed.data;
-      return `Saved evidence: ${evidence.path} lines ${evidence.startLine}-${evidence.endLine} (${evidence.reason})`;
+      return truncateBytes(
+        `Saved evidence: ${evidence.path} lines ${evidence.startLine}-${evidence.endLine} (${evidence.reason})`,
+        MAX_TOOL_RESULT_BYTES,
+      ).text;
     }
 
     default:
@@ -239,34 +280,116 @@ async function search(
   if (matches.length === 0) {
     return "No matches found.";
   }
+  // Build the result within the byte budget, recording only the lines actually
+  // shown so grounding never covers a match (or context line) the model did not
+  // see. The note that signals truncation consumes bytes too, so it is reserved
+  // up front — every match (including the first) is cut to whole display lines.
+  const note = "\n\n(结果已截断：更多匹配未显示，可用更窄的 pattern 或更小的 contextLines 重搜)";
+  const contentBudget = MAX_TOOL_RESULT_BYTES - byteLength(note);
+  const parts: string[] = [];
+  let usedBytes = 0;
+
   for (const match of matches) {
-    // Record the range actually returned: the match line plus whatever context
-    // lines ripgrep really produced (fewer at file boundaries).
-    runtime.returnRecorder?.record(
-      match.path,
-      match.line - match.contextBefore.length,
-      match.line + match.contextAfter.length,
-    );
+    const sep = parts.length === 0 ? "" : "\n\n";
+    const sepBytes = byteLength(sep);
+    const wholeText = formatSearchMatch(match);
+
+    if (usedBytes + sepBytes + byteLength(wholeText) <= contentBudget) {
+      parts.push(sep + wholeText);
+      usedBytes += sepBytes + byteLength(wholeText);
+      runtime.returnRecorder?.record(
+        match.path,
+        match.line - match.contextBefore.length,
+        match.line + match.contextAfter.length,
+      );
+      continue;
+    }
+
+    // This match does not fit in full: truncate it to whole lines and stop,
+    // recording only the source lines that are fully shown.
+    const budget = contentBudget - usedBytes - sepBytes;
+    const fit = truncateMatchLines(searchMatchLines(match), Math.max(budget, 0));
+    if (fit.text !== "") {
+      parts.push(sep + fit.text);
+      if (fit.range !== null) {
+        runtime.returnRecorder?.record(match.path, fit.range.startLine, fit.range.endLine);
+      }
+    }
+    return `${parts.join("")}${note}`;
   }
-  return matches.map(formatSearchMatch).join("\n\n");
+  return parts.join("");
 }
 
-function formatSearchMatch(match: {
-  path: string;
-  line: number;
-  column: number;
-  matchText: string;
-  contextBefore: string[];
-  contextAfter: string[];
-}): string {
-  const lines = [`${match.path}:${match.line}:${match.column}: ${match.matchText}`];
-  for (const before of match.contextBefore) {
-    lines.push(`  - ${before}`);
+/** One display line of a search match, tagged with the source line it shows. */
+interface SearchDisplayLine {
+  sourceLine: number;
+  text: string;
+}
+
+/**
+ * The display lines of a match in output order: the `path:line:col:` header
+ * first (so the match itself is protected from truncation), then the context
+ * lines. Each line carries its 1-based source line for honest range recording.
+ */
+function searchMatchLines(match: SearchMatch): SearchDisplayLine[] {
+  const lines: SearchDisplayLine[] = [
+    {
+      sourceLine: match.line,
+      text: `${match.path}:${match.line}:${match.column}: ${match.matchText}`,
+    },
+  ];
+  match.contextBefore.forEach((text, index) => {
+    lines.push({
+      sourceLine: match.line - match.contextBefore.length + index,
+      text: `  - ${text}`,
+    });
+  });
+  match.contextAfter.forEach((text, index) => {
+    lines.push({
+      sourceLine: match.line + 1 + index,
+      text: `  + ${text}`,
+    });
+  });
+  return lines;
+}
+
+function formatSearchMatch(match: SearchMatch): string {
+  return searchMatchLines(match)
+    .map((line) => line.text)
+    .join("\n");
+}
+
+/**
+ * Keep the first whole display lines of a match that fit in `maxBytes`, so a
+ * single match can never blow the per-result cap. The source range covered by
+ * the fully-shown lines is returned for recording; when the very first line
+ * (the match header) alone exceeds the budget it is byte-truncated and nothing
+ * is citable (`range: null`), because the model saw only part of that line.
+ */
+function truncateMatchLines(
+  lines: SearchDisplayLine[],
+  maxBytes: number,
+): { text: string; range: { startLine: number; endLine: number } | null } {
+  const first = lines[0]!;
+  if (byteLength(first.text) > maxBytes) {
+    return { text: truncateBytes(first.text, maxBytes).text, range: null };
   }
-  for (const after of match.contextAfter) {
-    lines.push(`  + ${after}`);
+  const kept: SearchDisplayLine[] = [first];
+  let bytes = byteLength(first.text);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (bytes + 1 + byteLength(line.text) > maxBytes) {
+      break;
+    }
+    kept.push(line);
+    bytes += 1 + byteLength(line.text);
   }
-  return lines.join("\n");
+  const startLine = Math.min(...kept.map((line) => line.sourceLine));
+  const endLine = Math.max(...kept.map((line) => line.sourceLine));
+  return {
+    text: kept.map((line) => line.text).join("\n"),
+    range: { startLine, endLine },
+  };
 }
 
 function readFile(
@@ -279,18 +402,55 @@ function readFile(
     args.startLine,
     args.endLine,
   );
-  // Record the slice actually returned (clamped), not the requested range.
-  runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
+  // Same-turn re-read of the exact range: point at the earlier result instead
+  // of re-sending the full text (issue #23, token waste).
+  if (runtime.returnRecorder?.hasRead?.(args.path, slice.startLine, slice.endLine)) {
+    return `${args.path} (lines ${slice.startLine}-${slice.endLine}) 本轮已读，见上文。`;
+  }
   const header = `${args.path} (lines ${slice.startLine}-${slice.endLine} of ${slice.totalLines})`;
   if (slice.content === "") {
+    // Record the empty slice so a claim for this range is never grounded.
+    runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
     return `${header}\n(empty)`;
   }
-  return `${header}\n${numberLines(slice.content, slice.startLine)}`;
+  // Reserve the header, the newline, and the truncation note up front, then fit
+  // the *numbered* lines into what remains. The note covers both the normal
+  // "more lines follow" case and the "first line alone blew the cap" case, so
+  // the longer one is reserved and the final string can never exceed the cap.
+  const noteTruncated = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用更小的行号范围重读剩余部分)`;
+  const noteUncitable = `\n(内容已截断：首行即超过 ${MAX_TOOL_RESULT_BYTES} 字节，未完整显示任何一行，此行不可引用)`;
+  const reservedBytes =
+    byteLength(header) +
+    byteLength("\n") +
+    Math.max(byteLength(noteTruncated), byteLength(noteUncitable));
+  const fit = fitSourceLines(
+    slice.content,
+    MAX_TOOL_RESULT_BYTES - reservedBytes,
+    slice.startLine,
+  );
+  // Record only whole lines actually shown — a byte-truncated first line (or a
+  // truncated tail) must not be citable.
+  if (fit.keptLines > 0) {
+    runtime.returnRecorder?.record(
+      args.path,
+      slice.startLine,
+      slice.startLine + fit.keptLines - 1,
+    );
+  }
+  const numbered = numberLines(fit.content, slice.startLine);
+  if (!fit.truncated) {
+    return `${header}\n${numbered}`;
+  }
+  const note = fit.keptLines === 0 ? noteUncitable : noteTruncated;
+  return `${header}\n${numbered}${note}`;
 }
 
 function numberLines(content: string, startLine: number): string {
+  if (content === "") {
+    return "";
+  }
   return content
     .split("\n")
-    .map((line, index) => `${String(startLine + index).padStart(4)} | ${line}`)
+    .map((line, index) => `${lineNumberPrefix(startLine + index)}${line}`)
     .join("\n");
 }

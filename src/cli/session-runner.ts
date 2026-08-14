@@ -14,6 +14,7 @@ import type { AgentDecision, Evidence } from "../domain/index.js";
 import type { AgentLoopEvent } from "../agent/index.js";
 import { Orchestrator, type StepResult } from "../orchestrator/orchestrator.js";
 import type { SessionStore } from "../store/index.js";
+import { bold, dim, neutralizeMarkdown, renderInline, stripTerminalControls } from "./markdown.js";
 
 /** Reads one line of user input (the readline `question` seam). */
 export type PromptFn = (query: string) => Promise<string>;
@@ -27,6 +28,8 @@ export type RunOutcomePhase = "recap" | "error" | "abandoned";
 
 export interface RunOutcome {
   phase: RunOutcomePhase;
+  /** True when the recap was salvaged after the agent failed to decide. */
+  degraded?: boolean;
 }
 
 /** How much text to accumulate before emitting one "thinking" progress dot. */
@@ -46,10 +49,12 @@ class EventSink {
   push(event: AgentLoopEvent): void {
     switch (event.type) {
       case "tool_call_started":
-        this.stderr.write(`→ ${event.name}${formatToolArgs(event.name, event.arguments)}\n`);
+        this.stderr.write(
+          dim(`→ ${renderInline(event.name)}${formatToolArgs(event.name, event.arguments)}`) + "\n",
+        );
         break;
       case "tool_result":
-        this.stderr.write(`  ${summarize(event.result)}\n`);
+        this.stderr.write(dim(`  ${summarize(event.result)}`) + "\n");
         break;
       case "text_delta":
         this.progress(event.delta);
@@ -121,7 +126,7 @@ export class SessionRunner {
 
     const onSigint = (): void => {
       this.deps.stderr.write(
-        `\nSession saved. 可用 repocoach resume ${this.deps.sessionId} 恢复\n`,
+        `\nSession saved. 可用 repocoach resume ${renderInline(this.deps.sessionId)} 恢复\n`,
       );
       process.exit(130);
     };
@@ -133,10 +138,13 @@ export class SessionRunner {
         skip = false;
 
         const terminal = result.phase === "recap" || result.phase === "error";
-        this.renderDecision(result.decision, terminal);
+        const decisionText = renderDecision(result.decision, terminal);
+        if (decisionText !== "") {
+          this.deps.stdout.write(decisionText);
+        }
 
         if (result.phase === "recap") {
-          return { phase: "recap" };
+          return { phase: "recap", degraded: result.decision === null };
         }
         if (result.phase === "error") {
           return { phase: "error" };
@@ -150,7 +158,8 @@ export class SessionRunner {
           question !== undefined &&
           question.trim() !== ""
         ) {
-          const line = await this.deps.prompt(`${question}\n> `);
+          this.deps.stdout.write(renderQuestion(question));
+          const line = await this.deps.prompt("> ");
           const trimmed = line.trim();
           if (trimmed === "/quit") {
             this.deps.store.updateSession(this.deps.sessionId, { status: "abandoned" });
@@ -168,26 +177,51 @@ export class SessionRunner {
     }
   }
 
-  /**
-   * Render evidence (and mid-session feedback) to stdout. The final
-   * feedback-phase decision is skipped here — its follow-up questions and next
-   * steps belong to the recap, not the live loop.
-   */
-  private renderDecision(decision: AgentDecision | null, terminal: boolean): void {
-    if (decision === null) {
-      return;
-    }
-    for (const evidence of decision.evidence) {
-      this.deps.stdout.write(`${formatEvidence(evidence)}\n`);
-    }
-    if (!terminal && decision.feedback !== undefined && decision.feedback !== "") {
-      this.deps.stdout.write(`${decision.feedback}\n`);
-    }
+}
+
+/** Width of the separator rule drawn above a question. */
+const QUESTION_RULE_WIDTH = 60;
+
+/**
+ * Render a turn's evidence (and mid-session feedback) for stdout. The final
+ * feedback-phase decision is skipped here — its follow-up questions and next
+ * steps belong to the recap, not the live loop.
+ */
+export function renderDecision(decision: AgentDecision | null, terminal: boolean): string {
+  if (decision === null) {
+    return "";
   }
+  let out = "";
+  if (decision.evidence.length > 0) {
+    out += renderEvidenceBlock(decision.evidence);
+  }
+  if (!terminal && decision.feedback !== undefined && decision.feedback !== "") {
+    out += `${neutralizeMarkdown(decision.feedback)}\n`;
+  }
+  return out;
+}
+
+/**
+ * Render evidence as an indented, dimmed group so it reads apart from the
+ * question text. The question is rendered separately (after evidence) at the
+ * end of the turn, adjacent to the input prompt.
+ */
+export function renderEvidenceBlock(evidence: Evidence[]): string {
+  return evidence
+    .map((item, index) => {
+      const branch = index === evidence.length - 1 ? "└─" : "├─";
+      return dim(`  ${branch} ${formatEvidence(item)}`);
+    })
+    .join("\n") + "\n";
+}
+
+/** Render a highlighted question with a separator rule above it. */
+export function renderQuestion(question: string): string {
+  return `${dim("─".repeat(QUESTION_RULE_WIDTH))}\n${bold(neutralizeMarkdown(question))}\n`;
 }
 
 export function formatEvidence(evidence: Evidence): string {
-  return `${evidence.path}:${evidence.startLine}-${evidence.endLine} — ${evidence.reason}`;
+  return `${renderInline(evidence.path)}:${renderInline(evidence.startLine)}-${renderInline(evidence.endLine)} — ${neutralizeMarkdown(evidence.reason)}`;
 }
 
 /** `repo_search(pattern=...)` — primitive args rendered as `key=value`. */
@@ -206,13 +240,13 @@ function formatToolArgs(name: string, argumentsJson: string): string {
   }
   const parts = Object.entries(args as Record<string, unknown>).map(([key, value]) => {
     const rendered = typeof value === "string" ? value : JSON.stringify(value);
-    return `${key}=${truncate(rendered, ARG_VALUE_WIDTH)}`;
+    return `${renderInline(key)}=${truncate(renderInline(rendered), ARG_VALUE_WIDTH)}`;
   });
   return parts.length === 0 ? "" : `(${parts.join(", ")})`;
 }
 
 function summarize(text: string): string {
-  return truncate(text.replace(/\s+/g, " ").trim(), RESULT_LINE_WIDTH);
+  return truncate(stripTerminalControls(text).replace(/\s+/g, " ").trim(), RESULT_LINE_WIDTH);
 }
 
 function truncate(text: string, width: number): string {

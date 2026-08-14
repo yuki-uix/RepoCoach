@@ -14,8 +14,25 @@ export {
   AgentLoop,
   DEFAULT_MAX_TOOL_ROUNDS,
   MAX_DECISION_RETRIES,
+  summarizeTurnHistory,
 } from "./loop.js";
 export type { AgentLoopEvent, AgentLoopOptions } from "./loop.js";
+
+export {
+  MAX_HISTORY_SUMMARY_BYTES,
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
+  fitSourceLines,
+  truncateBytes,
+} from "./limits.js";
+
+export {
+  describeJsonSyntaxError,
+  parseJsonLenient,
+  repairJson,
+  unwrapToolArguments,
+} from "./json-repair.js";
+export type { JsonParseResult } from "./json-repair.js";
 
 export {
   DEFAULT_DEEPSEEK_BASE_URL,

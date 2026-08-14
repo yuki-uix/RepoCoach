@@ -7,12 +7,15 @@ import {
   AgentDecisionInvalidError,
   AgentLoop,
   DeepSeekProvider,
+  MAX_HISTORY_SUMMARY_BYTES,
   REPO_DATA_END,
   REPO_DATA_START,
   REPO_DATA_WARNING,
   UNTRUSTED_DATA_END,
   UNTRUSTED_DATA_START,
   buildSystemPrompt,
+  byteLength,
+  summarizeTurnHistory,
   type AgentLogger,
   type AgentLoopEvent,
   type AgentLoopOptions,
@@ -21,6 +24,7 @@ import {
   type ChatProvider,
   type TokenUsage,
 } from "../../src/agent";
+import type { LearningTurn } from "../../src/domain";
 import { createReader, type Repository } from "../../src/reader";
 import { makeTempReader, sseLine, sseResponse } from "./helpers";
 
@@ -403,5 +407,82 @@ describe("AgentLoop", () => {
     expect(result.decision.evidence).toEqual([
       { path: "src/ghost.ts", startLine: 1, endLine: 2, reason: "never read" },
     ]);
+  });
+
+  it("unwraps a double-wrapped decision and accepts it", async () => {
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage(
+        "t",
+        "submit_decision",
+        JSON.stringify({ arguments: { evidence: [], nextAction: "finish" } }),
+      ),
+    );
+    const loop = makeLoop(provider);
+
+    const result = await loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [] });
+
+    expect(result.decision.nextAction).toBe("finish");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("recovers a decision whose feedback carries an invalid escape", async () => {
+    const badJson = '{"evidence": [], "nextAction": "finish", "feedback": "the regex is \\d+"}';
+    const { provider } = scriptedProvider(() => toolMessage("t", "submit_decision", badJson));
+    const loop = makeLoop(provider);
+
+    const result = await loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [] });
+
+    expect(result.decision.nextAction).toBe("finish");
+    expect(result.decision.feedback).toBe("the regex is \\d+");
+  });
+
+  it("feeds back a targeted JSON error when the decision is structurally broken", async () => {
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage("t", "submit_decision", '{"evidence": [], "nextAction": "unterminated'),
+    );
+    const loop = makeLoop(provider);
+
+    await expect(
+      loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    const feedback = requests[1].messages.find((m) => m.role === "tool");
+    expect(feedback?.content).toContain("不是合法 JSON");
+  });
+
+  it("caps the turn-history summary and collapses older turns", () => {
+    const longFeedback = "feedback ".repeat(100);
+    const turns: LearningTurn[] = Array.from({ length: 20 }, (_, i) => ({
+      sessionId: "s1",
+      question: `Question ${i + 1}?`,
+      userAnswer: "answer",
+      evidence: [],
+      assessment: "correct",
+      feedback: longFeedback,
+    }));
+
+    const summary = summarizeTurnHistory(turns);
+
+    expect(summary).not.toBeNull();
+    expect(byteLength(summary!)).toBeLessThanOrEqual(MAX_HISTORY_SUMMARY_BYTES);
+    expect(summary).toContain("omitted");
+  });
+
+  it("reserves room for the omission marker so the summary never exceeds the cap", () => {
+    // Short per-turn lines land the pre-marker budget within a few bytes of the
+    // cap, so the older-turn marker used to push the joined string over it.
+    const turns: LearningTurn[] = Array.from({ length: 120 }, () => ({
+      sessionId: "s1",
+      question: "q",
+      userAnswer: "a",
+      evidence: [],
+      feedback: "f".repeat(10),
+    }));
+
+    const summary = summarizeTurnHistory(turns);
+
+    expect(summary).not.toBeNull();
+    expect(summary).toContain("omitted");
+    expect(byteLength(summary!)).toBeLessThanOrEqual(MAX_HISTORY_SUMMARY_BYTES);
   });
 });

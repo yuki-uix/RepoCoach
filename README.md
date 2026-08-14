@@ -124,6 +124,9 @@ pnpm start -- resume <sessionId>
 
 # 列出历史 Session（id、仓库、阶段、耗时）
 pnpm start -- list
+
+# 查看某个 Session 已保存的问答与证据（error / abandoned 结束后也能看）
+pnpm start -- show <sessionId>
 ```
 
 - 问答中直接回车 = 跳过本题；输入 `/quit` 提前结束。

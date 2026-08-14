@@ -3,7 +3,8 @@
  *
  * `repocoach start <url-or-path>` imports a repository, shows feature
  * candidates, runs the Q&A loop and renders the recap. `resume <sessionId>`
- * continues an interrupted session; `list` enumerates persisted sessions.
+ * continues an interrupted session; `list` enumerates persisted sessions;
+ * `show <sessionId>` renders one session's persisted turns and evidence.
  * All interaction uses node:readline/promises over injectable streams (no CLI
  * framework, zero new dependencies). See docs/architecture.md §3.
  */
@@ -20,7 +21,9 @@ import {
 } from "../import/index.js";
 import { assembleSession, type AssembleDeps, type SessionAssembly } from "./assemble.js";
 import { lastFeedback, renderRecap, formatDuration } from "./recap.js";
-import { SessionRunner, type EventTarget, type PromptFn } from "./session-runner.js";
+import { renderInline } from "./markdown.js";
+import { SessionRunner, type EventTarget, type PromptFn, type RunOutcome } from "./session-runner.js";
+import { renderSessionShow } from "./show.js";
 import type { CandidateScope } from "./candidates.js";
 
 export { assembleSession, DEFAULT_DATA_DIR } from "./assemble.js";
@@ -30,7 +33,13 @@ export {
   GeneratedCandidateProvider,
 } from "./candidates.js";
 export type { CandidateProvider, CandidateScope } from "./candidates.js";
-export { SessionRunner } from "./session-runner.js";
+export {
+  SessionRunner,
+  formatEvidence,
+  renderDecision,
+  renderEvidenceBlock,
+  renderQuestion,
+} from "./session-runner.js";
 export type { RunOutcome, RunOutcomePhase } from "./session-runner.js";
 export {
   collectEvidence,
@@ -40,6 +49,9 @@ export {
   renderRecap,
   splitFeedback,
 } from "./recap.js";
+export { neutralizeMarkdown, renderInline, renderUntrustedBlock, stripTerminalControls } from "./markdown.js";
+export { renderSessionShow } from "./show.js";
+export type { ShowDeps } from "./show.js";
 
 export type CliDeps = AssembleDeps;
 
@@ -55,6 +67,7 @@ function makePrompt(stdin: Readable, stdout: Writable): Prompt {
   // listener feeding a queue keeps every line regardless of arrival timing.
   const queue: string[] = [];
   const waiters: Array<(line: string) => void> = [];
+  let closed = false;
   rl.on("line", (line) => {
     const waiter = waiters.shift();
     if (waiter !== undefined) {
@@ -63,12 +76,25 @@ function makePrompt(stdin: Readable, stdout: Writable): Prompt {
       queue.push(line);
     }
   });
+  // stdin EOF (Ctrl-D / a scripted stream ending) must release every pending
+  // question instead of leaving the `question()` promise hanging forever — a
+  // hung top-level await turns a clean end-of-input into exit 13. Resolving
+  // with "" is the same "no input" every caller already treats as skip/default.
+  rl.on("close", () => {
+    closed = true;
+    for (const waiter of waiters.splice(0)) {
+      waiter("");
+    }
+  });
   return {
     question(query) {
       stdout.write(query);
       const next = queue.shift();
       if (next !== undefined) {
         return Promise.resolve(next);
+      }
+      if (closed) {
+        return Promise.resolve("");
       }
       return new Promise((resolvePromise) => waiters.push(resolvePromise));
     },
@@ -97,12 +123,17 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         return await runResume(arg, resolvedDeps);
       case "list":
         return runList(resolvedDeps);
+      case "show":
+        if (arg === undefined) {
+          return usageError(deps, "show requires a <sessionId>");
+        }
+        return runShow(arg, resolvedDeps);
       default:
-        return usageError(deps, `unknown command "${command}"`);
+        return usageError(deps, `unknown command "${renderInline(command)}"`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    (deps.stderr ?? process.stderr).write(`Error: ${message}\n`);
+    (deps.stderr ?? process.stderr).write(`Error: ${renderInline(message)}\n`);
     return 1;
   }
 }
@@ -151,7 +182,7 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
         );
       } else {
         asm.stderr.write(
-          `Warning: session ${resumed.sessionId} has no pinned commit SHA; ` +
+          `Warning: session ${renderInline(resumed.sessionId)} has no pinned commit SHA; ` +
             `resuming against the current repository state (content may have changed).\n`,
         );
       }
@@ -208,9 +239,27 @@ function runList(deps: CliDeps): number {
   for (const session of sessions) {
     const duration = asm.store.sessionDuration(session.id);
     asm.stdout.write(
-      `${session.id}  ${session.repositoryId}  ${session.phase}  ${formatDuration(duration)}\n`,
+      `${renderInline(session.id)}  ${renderInline(session.repositoryId)}  ${renderInline(session.phase)}  ${formatDuration(duration)}\n`,
     );
   }
+  return 0;
+}
+
+function runShow(sessionId: string, deps: CliDeps): number {
+  const asm = assembleSession(deps);
+  // `listTurns`/`sessionDuration` throw `Unknown session` on a missing id, but
+  // `getSession` returns undefined — check it first for a single clear message.
+  const session = asm.store.getSession(sessionId);
+  if (session === undefined) {
+    throw new Error(`No session found: ${renderInline(sessionId)}`);
+  }
+  asm.stdout.write(
+    renderSessionShow({
+      session,
+      turns: asm.store.listTurns(sessionId),
+      durationMs: asm.store.sessionDuration(sessionId),
+    }),
+  );
   return 0;
 }
 
@@ -218,17 +267,24 @@ async function finishSession(
   asm: SessionAssembly,
   repo: Repository,
   sessionId: string,
-  outcome: { phase: "recap" | "error" | "abandoned" },
+  outcome: RunOutcome,
   prompt: PromptFn,
 ): Promise<number> {
   if (outcome.phase === "abandoned") {
+    // `/quit` marks the session abandoned, which `resumeSession` rejects — a
+    // resume hint here would send the user down a path that always fails.
     asm.stdout.write(
-      `\nSession ${sessionId} 已标记 abandoned。可用 repocoach resume ${sessionId} 恢复。\n`,
+      `\nSession ${renderInline(sessionId)} 已标记 abandoned，无法再恢复。可用 repocoach show ${renderInline(sessionId)} 查看已保存的内容，或 repocoach start 重新开始。\n`,
     );
     return 0;
   }
   if (outcome.phase === "error") {
-    asm.stderr.write(`Session ${sessionId} 进入 error 状态，无法完成复盘。\n`);
+    // The session is in a terminal phase, so `resumeSession` refuses it; point
+    // the user at the persisted evidence (via `show`, which actually renders
+    // it) instead of a resume that cannot work.
+    asm.stderr.write(
+      `Session ${renderInline(sessionId)} 进入 error 状态，无法继续。可用 repocoach show ${renderInline(sessionId)} 查看已保存的证据，或 repocoach start 重新开始新的学习。\n`,
+    );
     return 1;
   }
 
@@ -242,6 +298,11 @@ async function finishSession(
     finalFeedback: lastFeedback(turns),
     durationMs: asm.store.sessionDuration(sessionId),
   });
+  if (outcome.degraded) {
+    asm.stderr.write(
+      `⚠ 模型未能产出有效决策，已用已保存证据合成一份最小复盘。\n`,
+    );
+  }
   asm.stdout.write(`${recap}\n`);
 
   const selfAssessment = await prompt("你现在能向别人复述这条链路吗？(y/n) ");
@@ -253,7 +314,7 @@ async function finishSession(
     userAnswer: selfAssessment.trim(),
     evidence: [],
   });
-  asm.stdout.write(`Session ${sessionId} 完成。\n`);
+  asm.stdout.write(`Session ${renderInline(sessionId)} 完成。\n`);
   return 0;
 }
 
@@ -267,9 +328,11 @@ async function selectCandidate(
   }
   stdout.write("可学习的功能候选:\n");
   candidates.forEach((candidate, index) => {
-    stdout.write(`  ${index + 1}. ${candidate.title} [${candidate.difficulty}] — ${candidate.description}\n`);
+    stdout.write(
+      `  ${index + 1}. ${renderInline(candidate.title)} [${renderInline(candidate.difficulty)}] — ${renderInline(candidate.description)}\n`,
+    );
     if (candidate.entryFiles.length > 0) {
-      stdout.write(`     入口文件: ${candidate.entryFiles.join(", ")}\n`);
+      stdout.write(`     入口文件: ${candidate.entryFiles.map((file) => renderInline(file)).join(", ")}\n`);
     }
   });
   const line = await prompt(`选择编号 (1-${candidates.length}): `);
@@ -279,23 +342,25 @@ async function selectCandidate(
   }
   const index = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(index) || index < 1 || index > candidates.length) {
-    throw new Error(`Invalid selection: "${trimmed}"`);
+    throw new Error(`Invalid selection: "${renderInline(trimmed)}"`);
   }
   return candidates[index - 1]!;
 }
 
 /** Show the imported repository's basic information (docs/mvp-spec.md §5.1). */
 function showImportSummary(stdout: Writable, imp: RepositoryImport): void {
-  stdout.write(`仓库: ${imp.packageInfo?.name ?? repositoryIdFromRepo(imp.repo)}\n`);
+  stdout.write(
+    `仓库: ${renderInline(imp.packageInfo?.name ?? repositoryIdFromRepo(imp.repo))}\n`,
+  );
   stdout.write(`文件数: ${imp.tree.length}\n`);
   if (imp.entryCandidates.length > 0) {
-    stdout.write(`入口候选: ${imp.entryCandidates.join(", ")}\n`);
+    stdout.write(`入口候选: ${imp.entryCandidates.map((file) => renderInline(file)).join(", ")}\n`);
   }
   if (imp.workspaces.length > 0) {
     stdout.write("Workspaces:\n");
     for (const workspace of imp.workspaces) {
       stdout.write(
-        `  - ${workspace.path}${workspace.name !== undefined ? ` (${workspace.name})` : ""}\n`,
+        `  - ${renderInline(workspace.path)}${workspace.name !== undefined ? ` (${renderInline(workspace.name)})` : ""}\n`,
       );
     }
   }
@@ -304,10 +369,10 @@ function showImportSummary(stdout: Writable, imp: RepositoryImport): void {
 /** Surface non-fatal import observations (empty repo, missing package.json). */
 function showImportWarnings(stderr: Writable, imp: RepositoryImport): void {
   for (const warning of imp.warnings) {
-    stderr.write(`Warning: ${warning}\n`);
+    stderr.write(`Warning: ${renderInline(warning)}\n`);
   }
   if (imp.packageError !== undefined) {
-    stderr.write(`Warning: ${imp.packageError}\n`);
+    stderr.write(`Warning: ${renderInline(imp.packageError)}\n`);
   }
 }
 
@@ -323,7 +388,7 @@ async function selectWorkspace(
   stdout.write("检测到 monorepo，请选择要学习的 workspace:\n");
   workspaces.forEach((workspace, index) => {
     stdout.write(
-      `  ${index + 1}. ${workspace.path}${workspace.name !== undefined ? ` (${workspace.name})` : ""}\n`,
+      `  ${index + 1}. ${renderInline(workspace.path)}${workspace.name !== undefined ? ` (${renderInline(workspace.name)})` : ""}\n`,
     );
   });
   const line = await prompt(`选择编号 (1-${workspaces.length}): `);
@@ -333,7 +398,7 @@ async function selectWorkspace(
   }
   const index = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(index) || index < 1 || index > workspaces.length) {
-    throw new Error(`Invalid selection: "${trimmed}"`);
+    throw new Error(`Invalid selection: "${renderInline(trimmed)}"`);
   }
   return { workspacePath: workspaces[index - 1]!.path };
 }
@@ -411,12 +476,13 @@ function parseArgs(argv: string[]): {
 
 function usageError(deps: CliDeps, message: string): number {
   const err = deps.stderr ?? process.stderr;
-  err.write(`Error: ${message}\n`);
+  err.write(`Error: ${renderInline(message)}\n`);
   err.write(
     "Usage:\n" +
       "  repocoach start <url-or-path> [--data-dir <dir>]\n" +
       "  repocoach resume <sessionId> [--data-dir <dir>]\n" +
-      "  repocoach list [--data-dir <dir>]\n",
+      "  repocoach list [--data-dir <dir>]\n" +
+      "  repocoach show <sessionId> [--data-dir <dir>]\n",
   );
   return 1;
 }

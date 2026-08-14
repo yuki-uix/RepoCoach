@@ -27,7 +27,9 @@ import {
   type RepoDataMeta,
 } from "./data-guard.js";
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
-import { describeError, formatZodError } from "./errors.js";
+import { formatZodError } from "./errors.js";
+import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
+import { MAX_HISTORY_SUMMARY_BYTES, byteLength } from "./limits.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type {
@@ -47,11 +49,17 @@ import {
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
 
-/** Thrown when the model never produces a schema-valid decision. */
+/**
+ * Thrown when the model never produces a schema-valid decision. Carries the
+ * provider usage the loop accumulated before failing, so the caller can still
+ * count tokens a failed call actually spent (failed calls cost real tokens).
+ */
 export class AgentDecisionInvalidError extends Error {
-  constructor(message: string) {
+  readonly usage: TokenUsage;
+  constructor(message: string, usage: TokenUsage) {
     super(message);
     this.name = "AgentDecisionInvalidError";
+    this.usage = usage;
   }
 }
 
@@ -180,6 +188,7 @@ export class AgentLoop {
       if (decisionRetries > this.maxDecisionRetries) {
         throw new AgentDecisionInvalidError(
           `Decision failed validation after ${this.maxDecisionRetries} retries: ${message}`,
+          usage,
         );
       }
       this.emit({ type: "tool_result", name: "submit_decision", result: message });
@@ -210,6 +219,7 @@ export class AgentLoop {
         if (forceDecision) {
           throw new AgentDecisionInvalidError(
             "Model produced plain text instead of submit_decision at the tool-call limit",
+            usage,
           );
         }
         messages.push({ role: "user", content: PLAIN_TEXT_NUDGE });
@@ -275,6 +285,7 @@ export class AgentLoop {
 
     throw new AgentDecisionInvalidError(
       `Agent loop exceeded ${maxRounds} rounds without a valid decision`,
+      usage,
     );
   }
 
@@ -310,16 +321,16 @@ export class AgentLoop {
   }
 
   private parseDecision(argumentsJson: string): DecisionOutcome {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(argumentsJson);
-    } catch (error) {
+    const raw = parseJsonLenient(argumentsJson);
+    if (!raw.ok) {
       return {
         kind: "error",
-        message: `submit_decision arguments are not valid JSON: ${describeError(error)}`,
+        message: `submit_decision 的参数不是合法 JSON：${raw.message}。请重新发送合法的 JSON 对象（不要在外层包裹 arguments/input/parameters 键）。`,
       };
     }
-    const parsed = agentDecisionSchema.safeParse(raw);
+    // The model sometimes double-wraps the decision as {"arguments": {...}};
+    // unwrap a single-layer wrapper before schema validation.
+    const parsed = agentDecisionSchema.safeParse(unwrapToolArguments(raw.value));
     if (!parsed.success) {
       return {
         kind: "error",
@@ -358,11 +369,11 @@ export class AgentLoop {
 }
 
 function parseArguments(argumentsJson: string): unknown | undefined {
-  try {
-    return JSON.parse(argumentsJson);
-  } catch {
+  const parsed = parseJsonLenient(argumentsJson);
+  if (!parsed.ok) {
     return undefined;
   }
+  return unwrapToolArguments(parsed.value);
 }
 
 function pathOfTool(name: string, args: unknown): string | undefined {
@@ -388,29 +399,57 @@ function buildTurnInstruction(input: AgentInvokerInput): string {
   return "Proceed with the current phase.";
 }
 
-function summarizeTurnHistory(turns: LearningTurn[]): string | null {
+export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   if (turns.length === 0) {
     return null;
   }
-  const lines = turns.map((turn, index) => {
-    const parts = [`Q${index + 1}: ${turn.question || "(no question)"}`];
-    if (turn.skipped) {
-      parts.push("(skipped)");
-    } else if (turn.userAnswer !== undefined) {
-      parts.push(`A: ${turn.userAnswer}`);
+  const prefix = "Previous turns:\n";
+  const full = `${prefix}${turns.map(formatTurnLine).join("\n")}`;
+  if (byteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
+    return full;
+  }
+  // Cap the summary: keep the most recent turns in full and collapse the older
+  // ones into a single marker so a long session stops re-sending every word.
+  // Reserve the marker's maximum length up front (its digit count grows with
+  // `omitted`, so it can never exceed the marker for `turns.length`); without
+  // that reservation the marker pushes the joined string over the cap.
+  const maxOlderBytes = byteLength(`… ${turns.length} earlier turn(s) omitted (see session file)\n`);
+  const budget = MAX_HISTORY_SUMMARY_BYTES - byteLength(prefix) - maxOlderBytes;
+  const kept: string[] = [];
+  let keptBytes = 0;
+  let index = turns.length - 1;
+  while (index >= 0) {
+    const line = formatTurnLine(turns[index]!, index);
+    const separator = kept.length === 0 ? 0 : 1;
+    if (byteLength(line) + separator + keptBytes > budget) {
+      break;
     }
-    if (turn.assessment !== undefined) {
-      parts.push(`assessment: ${turn.assessment}`);
-    }
-    if (turn.feedback !== undefined && turn.feedback !== "") {
-      parts.push(`feedback: ${turn.feedback}`);
-    }
-    if (turn.evidence.length > 0) {
-      parts.push(
-        `evidence: ${turn.evidence.map((e) => `${e.path}:${e.startLine}-${e.endLine}`).join(", ")}`,
-      );
-    }
-    return parts.join(" | ");
-  });
-  return `Previous turns:\n${lines.join("\n")}`;
+    kept.unshift(line);
+    keptBytes += byteLength(line) + separator;
+    index -= 1;
+  }
+  const omitted = index + 1;
+  const older = omitted > 0 ? `… ${omitted} earlier turn(s) omitted (see session file)\n` : "";
+  return `${prefix}${older}${kept.join("\n")}`;
+}
+
+function formatTurnLine(turn: LearningTurn, index: number): string {
+  const parts = [`Q${index + 1}: ${turn.question || "(no question)"}`];
+  if (turn.skipped) {
+    parts.push("(skipped)");
+  } else if (turn.userAnswer !== undefined) {
+    parts.push(`A: ${turn.userAnswer}`);
+  }
+  if (turn.assessment !== undefined) {
+    parts.push(`assessment: ${turn.assessment}`);
+  }
+  if (turn.feedback !== undefined && turn.feedback !== "") {
+    parts.push(`feedback: ${turn.feedback}`);
+  }
+  if (turn.evidence.length > 0) {
+    parts.push(
+      `evidence: ${turn.evidence.map((e) => `${e.path}:${e.startLine}-${e.endLine}`).join(", ")}`,
+    );
+  }
+  return parts.join(" | ");
 }

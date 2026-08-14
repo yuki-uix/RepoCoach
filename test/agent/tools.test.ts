@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
   createToolRegistry,
   type Evidence,
   type EvidenceValidator,
   type ReturnRecorder,
   type ToolRegistry,
 } from "../../src/agent";
+import { ToolReturnLedger } from "../../src/evidence";
 import { makeTempReader } from "./helpers";
 import type { Reader } from "../../src/reader";
 
@@ -96,6 +99,24 @@ describe("repo_get_tree", () => {
     expect(result).toContain("src/util.ts");
     expect(result).toContain("package.json");
   });
+
+  it("byte-caps a huge listing including its note", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 400; i++) {
+      files[`src/file_${String(i).padStart(4, "0")}.ts`] = "export const x = 1;\n";
+    }
+    const { reader, repo } = makeTempReader(files);
+    const registry = createToolRegistry({ reader, repo });
+
+    const result = await registry.execute({
+      name: "repo_get_tree",
+      args: {},
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+  });
 });
 
 describe("repo_read_file", () => {
@@ -119,6 +140,24 @@ describe("repo_read_file", () => {
     });
     expect(result).toContain("Error:");
     expect(result).toContain("escapes repository root");
+  });
+
+  it("byte-caps a Reader error string", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const exploding: Reader = {
+      ...reader,
+      readFile: () => {
+        throw new Error(`boom ${"x".repeat(20_000)}`);
+      },
+    };
+    const registry = createToolRegistry({ reader: exploding, repo });
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts" },
+      collectedEvidence: [],
+    });
+    expect(result).toMatch(/^Error: /);
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
   });
 });
 
@@ -207,6 +246,31 @@ describe("repo_save_evidence", () => {
     expect(result).toContain("Error: invalid evidence");
     expect(collected).toHaveLength(0);
   });
+
+  it("byte-caps a receipt with an oversized reason", async () => {
+    const { registry } = makeRegistry();
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3, reason: "r".repeat(20_000) },
+      collectedEvidence: [],
+    });
+    expect(result).toContain("Saved evidence");
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("byte-caps a rejected-evidence error string", async () => {
+    const rejecting: EvidenceValidator = {
+      validate: () => ({ ok: false, reason: "x".repeat(20_000) }),
+    };
+    const { registry } = makeRegistry(rejecting);
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
+      collectedEvidence: [],
+    });
+    expect(result).toContain("Error: evidence rejected");
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
 });
 
 describe("return recording", () => {
@@ -264,5 +328,207 @@ describe("return recording", () => {
     });
 
     expect(records).toHaveLength(0);
+  });
+});
+
+describe("same-turn read dedup", () => {
+  it("returns a short hint instead of re-sending an already-read range", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+    const second = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+
+    expect(second).toContain("本轮已读");
+    expect(second).not.toContain("return a + b");
+  });
+
+  it("does not dedup a different range of the same file", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 1 },
+      collectedEvidence: [],
+    });
+    const second = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 2, endLine: 2 },
+      collectedEvidence: [],
+    });
+
+    expect(second).toContain("2 |   return a + b;");
+  });
+});
+
+describe("repo_read_file truncation", () => {
+  it("truncates a large read and records only the shown range", async () => {
+    const bigLine = "const x = 1;\n";
+    const manyLines = bigLine.repeat(5_000);
+    const { reader, repo } = makeTempReader({ "src/big.ts": manyLines });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/big.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("内容已截断");
+    // The recorded range stops where the truncation cut the content, so a
+    // claim spanning the whole (unshown) file is not grounded.
+    expect(ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 5_000, reason: "" })).toBe(false);
+  });
+
+  it("caps a single oversized line and leaves it uncitable", async () => {
+    // A single 8,190-byte line used to overflow the cap: the old code reserved
+    // the whole budget for the line but still appended header + note.
+    const { reader, repo } = makeTempReader({ "src/big.ts": `${"x".repeat(8_190)}\n` });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/big.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("内容已截断");
+    // Only part of the single line is shown, so citing it is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("caps a multi-line read just over the limit and records only the shown prefix", async () => {
+    const line = "x".repeat(200);
+    const lines = Array.from({ length: 100 }, () => line);
+    const { reader, repo } = makeTempReader({ "src/big.ts": `${lines.join("\n")}\n` });
+    const { recorder, records } = makeRecordingRecorder();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: recorder });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/big.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("内容已截断");
+    // The ledger covers exactly the numbered lines shown, never a line past the
+    // truncation point.
+    const shownLines = (result.match(/^ *[0-9]+ \| /gm) ?? []).length;
+    expect(shownLines).toBeGreaterThan(0);
+    expect(shownLines).toBeLessThan(100);
+    expect(records).toEqual([{ path: "src/big.ts", startLine: 1, endLine: shownLines }]);
+  });
+});
+
+describe("repo_search truncation", () => {
+  it("caps the first oversized match and does not ground truncated context lines", async () => {
+    // A match on the first line with a huge context pulls in ~300 lines, so the
+    // very first match already exceeds the per-result cap.
+    const lines = Array.from({ length: 300 }, (_, i) =>
+      i === 0 ? `NEEDLE ${"x".repeat(60)}` : `line ${i} ${"x".repeat(60)}`,
+    );
+    const { reader, repo } = makeTempReader({ "src/big.ts": lines.join("\n") + "\n" });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "NEEDLE", contextLines: 300 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // The match line itself is shown and citable.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(true);
+    // A context line past the truncation point was never returned, so citing it
+    // is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 300, endLine: 300, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("drops a single oversized context line without recording it", async () => {
+    const { reader, repo } = makeTempReader({
+      "src/big.ts": "NEEDLE short\n" + "x".repeat(20_000) + "\n",
+    });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "NEEDLE", contextLines: 1 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // The oversized context line (line 2) is dropped whole, so it is not citable.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 2, endLine: 2, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("byte-caps a single oversized match line and leaves it uncitable", async () => {
+    // A single source line that is itself a giant match makes the header line
+    // alone exceed the cap; it is byte-truncated and not recorded.
+    const { reader, repo } = makeTempReader({ "src/big.ts": "x".repeat(20_000) + "\n" });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "x+", contextLines: 0 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // Only part of the match line is visible, so citing it is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(false);
+  });
+});
+
+describe("repo_get_package_info truncation", () => {
+  it("caps a package.json with hundreds of dependencies and adds a note", async () => {
+    const dependencies: Record<string, string> = {};
+    for (let i = 0; i < 600; i++) {
+      dependencies[`dependency-${i}`] = "^1.0.0";
+    }
+    const { reader, repo } = makeTempReader({
+      "package.json": JSON.stringify({ name: "big", dependencies }),
+    });
+    const registry = createToolRegistry({ reader, repo });
+
+    const result = await registry.execute({
+      name: "repo_get_package_info",
+      args: {},
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("内容已截断");
   });
 });
