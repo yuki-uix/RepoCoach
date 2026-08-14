@@ -133,6 +133,22 @@ pnpm start -- show <sessionId>
 - Session 按轮持久化在 `~/.repocoach`（可用 `--data-dir` 覆盖），Ctrl-C 不丢进度。
 - 等待模型时工具调用过程会流式打印在 stderr。
 
+## 评估 (Eval)
+
+`src/eval/` 把此前手动做的事（管道灌答案、跑真模型、人工读日志算指标）自动化成可重复的 harness，并作为后续 #25 成本优化的测量仪器。它复用真实装配路径（含强制接地），用脚本化回答驱动完整 Session，再按 `fixtures/expectations/` 的标注计算指标：Evidence precision、Path accuracy、Assessment 一致率、Adaptation、Hallucination、单 Session 成本。
+
+```bash
+pnpm build          # eval 脚本运行的是构建产物 dist/eval/bin.js，需先 build
+
+# 确定性 mock provider 跑 fixture，验证 harness 与指标计算本身（CI 跑这个，无需 API key）
+pnpm eval:mock
+
+# 真实 DeepSeek provider 跑 fixture，产出真实指标报告（需要 .env.local，不在 CI 跑）
+pnpm eval:real
+```
+
+两种模式共用同一 runner 与 metrics，只有 provider 不同。输出两份：stdout 的人类可读表格，以及仓库根目录 `eval-report.json`（机器可读，供优化前后对比；已加入 `.gitignore`）。可用 `node dist/eval/bin.js mock --out <path>` 覆盖 JSON 输出位置。
+
 ## 文档
 
 - [MVP 规格](./docs/mvp-spec.md)

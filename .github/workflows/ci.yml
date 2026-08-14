@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # `@vscode/ripgrep` ships its binary as per-platform npm packages
+      # (optionalDependencies), so a plain `pnpm install` fetches the linux-x64
+      # binary — no extra download step or approval is required.
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
+      # `eval:mock` needs the build output; it uses the deterministic mock
+      # provider and needs no API key, so it runs in CI.
+      - run: pnpm eval:mock

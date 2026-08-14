@@ -15,7 +15,9 @@
     "build": "tsc -p tsconfig.json && tsc -p fixtures/fixture-repo/tsconfig.json --noEmit",
     "start": "node dist/cli/bin.js",
     "test": "vitest run",
-    "lint": "eslint src test"
+    "lint": "eslint src test",
+    "eval:mock": "node dist/eval/bin.js mock",
+    "eval:real": "node dist/eval/bin.js real"
   },
   "dependencies": {
     "@vscode/ripgrep": "^1.18.0",
