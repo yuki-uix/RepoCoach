@@ -21,6 +21,7 @@ import {
 import type { PackageInfo, Repository } from "../reader/index.js";
 import { HeuristicCandidateGenerator } from "./heuristic.js";
 import {
+  ensureUniqueCandidateIds,
   filterCandidatesToTree,
   type CandidateGenerator,
   type CandidateGeneratorInput,
@@ -85,7 +86,7 @@ export class ModelCandidateGenerator implements CandidateGenerator {
       if (candidates !== null) {
         const kept = filterCandidatesToTree(candidates, input.tree);
         if (kept.length > 0) {
-          return kept;
+          return ensureUniqueCandidateIds(kept);
         }
       }
       messages.push({ role: "user", content: RETRY_MESSAGE });

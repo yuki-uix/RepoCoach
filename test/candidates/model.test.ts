@@ -121,4 +121,45 @@ describe("ModelCandidateGenerator", () => {
     expect(user?.content ?? "").toContain(REPO_DATA_END);
     expect(user?.content ?? "").toContain("src/index.ts");
   });
+
+  it("disambiguates duplicate ids from the model", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const dupes = JSON.stringify([
+      {
+        id: "dup",
+        title: "First",
+        description: "d",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "dup",
+        title: "Second",
+        description: "d",
+        entryFiles: ["src/parse/validate.ts"],
+        difficulty: "intermediate",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([dupes]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(candidates).toHaveLength(2);
+    const ids = candidates.map((candidate) => candidate.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The first keeps its id; the duplicate is suffixed, so a later
+    // find(id) never resolves to the wrong candidate.
+    expect(ids[0]).toBe("dup");
+    expect(ids[1]).not.toBe("dup");
+  });
 });

@@ -14,6 +14,7 @@
 import type { FeatureCandidate } from "../domain/index.js";
 import type { Reader, Repository } from "../reader/index.js";
 import {
+  ensureUniqueCandidateIds,
   filterCandidatesToTree,
   validateCandidates,
   type CandidateGenerator,
@@ -279,27 +280,4 @@ function slug(name: string): string {
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
   return value === "" ? "candidate" : value;
-}
-
-/**
- * Guarantee distinct ids across the final candidate list. Two entry paths can
- * slug to the same id (e.g. `src/foo-bar.ts` and `src/foo/bar.ts`), so when an
- * id is already taken append a `-2`, `-3`, … sequence until it is unique.
- */
-function ensureUniqueCandidateIds(
-  candidates: FeatureCandidate[],
-): FeatureCandidate[] {
-  const seen = new Set<string>();
-  return candidates.map((candidate) => {
-    let id = candidate.id;
-    if (seen.has(id)) {
-      let suffix = 2;
-      while (seen.has(`${id}-${suffix}`)) {
-        suffix += 1;
-      }
-      id = `${id}-${suffix}`;
-    }
-    seen.add(id);
-    return id === candidate.id ? candidate : { ...candidate, id };
-  });
 }

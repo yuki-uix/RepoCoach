@@ -63,3 +63,29 @@ export function validateCandidates(
   }
   return result;
 }
+
+/**
+ * Guarantee distinct ids across the final candidate list. Both generator exits
+ * (heuristic and model) route through this single gate: two candidates can
+ * legitimately carry the same id (a model returning duplicates, or two entry
+ * paths that slug identically), and a session resume looks candidates up by id —
+ * so duplicates are disambiguated here with a `-2`, `-3`, … suffix rather than
+ * left to the call site.
+ */
+export function ensureUniqueCandidateIds(
+  candidates: FeatureCandidate[],
+): FeatureCandidate[] {
+  const seen = new Set<string>();
+  return candidates.map((candidate) => {
+    let id = candidate.id;
+    if (seen.has(id)) {
+      let suffix = 2;
+      while (seen.has(`${id}-${suffix}`)) {
+        suffix += 1;
+      }
+      id = `${id}-${suffix}`;
+    }
+    seen.add(id);
+    return id === candidate.id ? candidate : { ...candidate, id };
+  });
+}
