@@ -65,7 +65,9 @@ export interface JudgeSampleDetail {
 export interface JudgeResult {
   total: number;
   agreed: number;
-  agreement: number;
+  /** `agreed / total`; `undefined` when there are no samples to judge. */
+  agreement?: number;
+  evaluable: boolean;
   disagreements: JudgeDisagreement[];
   confusion: ConfusionMatrix;
   /** Per-sample detail in sample order, for the report JSON. */
@@ -161,7 +163,8 @@ export async function judgeSamples(options: JudgeSamplesOptions): Promise<JudgeR
   return {
     total,
     agreed,
-    agreement: total === 0 ? 0 : agreed / total,
+    agreement: total === 0 ? undefined : agreed / total,
+    evaluable: total > 0,
     disagreements,
     confusion,
     samples: details,

@@ -17,8 +17,16 @@ function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
       failures: [],
       notApplicableDetails: [],
       precision: 1,
+      evaluable: true,
     },
-    pathAccuracy: { expected: [], actual: [], matched: 0, total: 0, accuracy: 1 },
+    pathAccuracy: {
+      expected: ["src/index.ts"],
+      actual: ["src/index.ts"],
+      matched: 1,
+      total: 1,
+      accuracy: 1,
+      evaluable: true,
+    },
     adaptation: {
       afterCorrect: "a",
       afterIncorrect: "b",
@@ -26,8 +34,16 @@ function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
       sameQuestion: false,
       adapted: true,
       threshold: 0.5,
+      evaluable: true,
     },
-    hallucination: { mentioned: [], missing: [], total: 0, missingCount: 0, ratio: 0 },
+    hallucination: {
+      mentioned: ["createTracker"],
+      missing: [],
+      total: 1,
+      missingCount: 0,
+      ratio: 0,
+      evaluable: true,
+    },
     cost: { inputTokens: 8, outputTokens: 8, wallClockMs: 12 },
     ...overrides,
   };
@@ -38,6 +54,7 @@ function judge(overrides: Partial<JudgeResult> = {}): JudgeResult {
     total: 2,
     agreed: 2,
     agreement: 1,
+    evaluable: true,
     disagreements: [],
     confusion: {
       correct: { correct: 2, partial: 0, incorrect: 0, unknown: 0 },
@@ -129,11 +146,12 @@ describe("report rendering (terminal gate)", () => {
       run: makeEvalRun(),
       metrics: metrics({
         hallucination: {
-          mentioned: [],
+          mentioned: ["evil"],
           missing: ["evil[2Jname"],
           total: 1,
           missingCount: 1,
           ratio: 1,
+          evaluable: true,
         },
       }),
       judge: judge(),
@@ -173,6 +191,7 @@ describe("report rendering (terminal gate)", () => {
             { path: "README.md", startLine: 3, endLine: 5, reason: "no symbol claimed", missing: [] },
           ],
           precision: 1,
+          evaluable: true,
         },
       }),
       judge: judge(),
@@ -224,5 +243,58 @@ describe("report rendering (terminal gate)", () => {
     const out = renderReport(report);
 
     expect(out).toContain('annotated "annotated q" ≠ model saw "model q"');
+  });
+
+  it("renders adaptation as not evaluable instead of adapted/not adapted", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun(),
+      metrics: metrics({
+        adaptation: {
+          afterCorrect: "",
+          afterIncorrect: "Where does the raw string get split?",
+          threshold: 0.5,
+          evaluable: false,
+          reason: "no follow-up question after the correct answer",
+        },
+      }),
+      judge: judge(),
+    });
+
+    const out = renderReport(report);
+
+    expect(out).toContain("Adaptation           not evaluable (no follow-up question after the correct answer)");
+    expect(out).not.toContain("adapted");
+  });
+
+  it("renders an empty denominator as not evaluable, never 0.0%", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun(),
+      metrics: metrics({
+        evidencePrecision: {
+          supported: 0,
+          total: 0,
+          notApplicable: 0,
+          failures: [],
+          notApplicableDetails: [],
+          evaluable: false,
+        },
+        hallucination: {
+          mentioned: [],
+          missing: [],
+          total: 0,
+          missingCount: 0,
+          evaluable: false,
+        },
+      }),
+      judge: judge({ total: 0, agreed: 0, agreement: undefined, evaluable: false, samples: [] }),
+    });
+
+    const out = renderReport(report);
+
+    expect(out).toContain("Evidence precision   0 / 0  not evaluable");
+    expect(out).toContain("Assessment agreement 0 / 0  not evaluable");
+    expect(out).not.toContain("(0.0%)");
   });
 });

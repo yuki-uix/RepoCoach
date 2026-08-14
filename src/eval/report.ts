@@ -109,16 +109,14 @@ function appendLiveSession(lines: string[], metrics: ReportMetrics): void {
   const notApplicableSuffix =
     precision.notApplicable > 0 ? `  (${precision.notApplicable} not applicable)` : "";
   lines.push(
-    `Evidence precision   ${precision.supported} / ${precision.total}  ${percent(precision.precision)}${notApplicableSuffix}`,
+    `Evidence precision   ${precision.supported} / ${precision.total}  ${ratioDisplay(precision.evaluable, precision.precision)}${notApplicableSuffix}`,
   );
   lines.push(
-    `Path accuracy        ${metrics.pathAccuracy.matched} / ${metrics.pathAccuracy.total}  ${percent(metrics.pathAccuracy.accuracy)}`,
+    `Path accuracy        ${metrics.pathAccuracy.matched} / ${metrics.pathAccuracy.total}  ${ratioDisplay(metrics.pathAccuracy.evaluable, metrics.pathAccuracy.accuracy)}`,
   );
+  appendAdaptation(lines, metrics.adaptation);
   lines.push(
-    `Adaptation           ${metrics.adaptation.adapted ? "adapted" : "not adapted"}  (jaccard ${metrics.adaptation.jaccard.toFixed(3)})`,
-  );
-  lines.push(
-    `Hallucination        ${metrics.hallucination.missingCount} missing / ${metrics.hallucination.total} mentioned  ${percent(metrics.hallucination.ratio)}`,
+    `Hallucination        ${metrics.hallucination.missingCount} missing / ${metrics.hallucination.total} mentioned  ${ratioDisplay(metrics.hallucination.evaluable, metrics.hallucination.ratio)}`,
   );
   lines.push(
     `Cost                 ${metrics.cost.inputTokens} in / ${metrics.cost.outputTokens} out tokens, ${metrics.cost.wallClockMs}ms`,
@@ -161,7 +159,7 @@ function appendJudgeMode(lines: string[], judge: JudgeResult): void {
   );
   lines.push("the model never generates its own question here.");
   lines.push(
-    `Assessment agreement ${judge.agreed} / ${judge.total}  ${percent(judge.agreement)}`,
+    `Assessment agreement ${judge.agreed} / ${judge.total}  ${ratioDisplay(judge.evaluable, judge.agreement)}`,
   );
 
   if (judge.disagreements.length > 0) {
@@ -220,4 +218,26 @@ function appendConfusionMatrix(lines: string[], confusion: ConfusionMatrix): voi
 
 function percent(ratio: number): string {
   return `(${(ratio * 100).toFixed(1)}%)`;
+}
+
+/**
+ * `(X%)` when the denominator was non-empty, else `not evaluable` — a
+ * degenerate input must never render as 0% or 100%.
+ */
+function ratioDisplay(evaluable: boolean, value: number | undefined): string {
+  return evaluable && value !== undefined ? percent(value) : "not evaluable";
+}
+
+/**
+ * Adaptation never renders "adapted"/"not adapted" when there was no follow-up
+ * question on either side; it reports why the comparison could not be made.
+ */
+function appendAdaptation(lines: string[], adaptation: AdaptationResult): void {
+  if (adaptation.evaluable && adaptation.adapted !== undefined && adaptation.jaccard !== undefined) {
+    lines.push(
+      `Adaptation           ${adaptation.adapted ? "adapted" : "not adapted"}  (jaccard ${adaptation.jaccard.toFixed(3)})`,
+    );
+    return;
+  }
+  lines.push(`Adaptation           not evaluable (${adaptation.reason ?? "no follow-up question"})`);
 }

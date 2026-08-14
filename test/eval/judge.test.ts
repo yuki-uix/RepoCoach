@@ -103,4 +103,22 @@ describe("judgeSamples", () => {
     expect(result.confusion.incorrect.unknown).toBe(1);
     expect(result.confusion.partial.unknown).toBe(1);
   });
+
+  it("reports not evaluable when there are no samples", async () => {
+    const { reader, repo } = makeTempRepo({});
+
+    const result = await judgeSamples({
+      provider: fixedAssessmentProvider([]),
+      reader,
+      repo,
+      featureGoal: "goal",
+      samples: [],
+    });
+
+    expect(result.total).toBe(0);
+    expect(result.evaluable).toBe(false);
+    expect(result.agreement).toBeUndefined();
+    expect(result.disagreements).toHaveLength(0);
+    expect(result.samples).toHaveLength(0);
+  });
 });

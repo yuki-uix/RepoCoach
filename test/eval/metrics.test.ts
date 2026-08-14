@@ -96,6 +96,17 @@ describe("evidencePrecision", () => {
     expect(result.failures).toHaveLength(0);
     expect(result.notApplicableDetails[0]?.missing).toEqual([]);
   });
+
+  it("reports not evaluable when there is no evidence at all", () => {
+    const { reader, repo } = makeTempRepo({ "src/a.ts": "export const x = 1;\n" });
+    const run = makeEvalRun({ turns: [] });
+
+    const result = evidencePrecision(run, reader, repo, SYMBOLS);
+
+    expect(result.total).toBe(0);
+    expect(result.evaluable).toBe(false);
+    expect(result.precision).toBeUndefined();
+  });
 });
 
 describe("pathAccuracy", () => {
@@ -157,6 +168,20 @@ describe("pathAccuracy", () => {
     expect(result.matched).toBe(1);
     expect(result.accuracy).toBe(0.5);
   });
+
+  it("reports not evaluable when the expected chain is empty", () => {
+    const run = makeEvalRun({
+      turns: [
+        makeTurn({ evidence: [{ path: "src/a.ts", startLine: 1, endLine: 1, reason: "a" }] }),
+      ],
+    });
+
+    const result = pathAccuracy(run, []);
+
+    expect(result.total).toBe(0);
+    expect(result.evaluable).toBe(false);
+    expect(result.accuracy).toBeUndefined();
+  });
 });
 
 describe("adaptation", () => {
@@ -176,8 +201,40 @@ describe("adaptation", () => {
 
     const result = adaptation(correctRun, incorrectRun, "correct", "incorrect");
 
+    expect(result.evaluable).toBe(true);
     expect(result.adapted).toBe(true);
     expect(result.jaccard).toBeLessThan(DEFAULT_ADAPTATION_THRESHOLD);
+  });
+
+  it("is not evaluable when only one run has a follow-up question", () => {
+    const correctRun = makeEvalRun({
+      turns: [
+        makeTurn({ userAnswer: "correct" }),
+        makeTurn({ question: "Who assigns a task its id?" }),
+      ],
+    });
+    const incorrectRun = makeEvalRun({
+      turns: [makeTurn({ userAnswer: "incorrect" })],
+    });
+
+    const result = adaptation(correctRun, incorrectRun, "correct", "incorrect");
+
+    expect(result.evaluable).toBe(false);
+    expect(result.adapted).toBeUndefined();
+    expect(result.jaccard).toBeUndefined();
+    expect(result.reason).toContain("incorrect");
+  });
+
+  it("is not evaluable when neither run has a follow-up question", () => {
+    const correctRun = makeEvalRun({ turns: [makeTurn({ userAnswer: "correct" })] });
+    const incorrectRun = makeEvalRun({ turns: [makeTurn({ userAnswer: "incorrect" })] });
+
+    const result = adaptation(correctRun, incorrectRun, "correct", "incorrect");
+
+    expect(result.evaluable).toBe(false);
+    expect(result.adapted).toBeUndefined();
+    expect(result.reason).toContain("correct");
+    expect(result.reason).toContain("incorrect");
   });
 
   it("does not flag adaptation for the identical question", () => {
@@ -252,6 +309,18 @@ describe("hallucination", () => {
 
     expect(result.missing).toEqual(["exportToCsv"]);
     expect(result.total).toBe(1);
+  });
+
+  it("reports not evaluable when no symbols are mentioned", async () => {
+    const { reader, repo } = makeTempRepo({
+      "src/index.ts": "export function createTracker() {}\n",
+    });
+
+    const result = await hallucination("No code here, just prose.", reader, repo);
+
+    expect(result.total).toBe(0);
+    expect(result.evaluable).toBe(false);
+    expect(result.ratio).toBeUndefined();
   });
 
   it("resolves file-path symbols against the repo tree, not source contents", async () => {

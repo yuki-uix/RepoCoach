@@ -6,6 +6,27 @@
  * `EvalRun`. The symbol vocabulary for both comes from the fixture's
  * `call-chain.json` (the ground truth for what symbols exist); for a real repo
  * it can be derived from the repository itself (issue #25).
+ *
+ * Degenerate-input behaviour. Every ratio metric must report "not evaluable"
+ * rather than 0% or 100% when its denominator is empty — a degenerate input
+ * (an empty run, a degraded recap, or a failed session that produced no
+ * evidence, no follow-up question, or no symbol mentions) must never fall on
+ * either side of the ratio. Each result therefore carries an `evaluable` flag;
+ * the ratio field itself is `undefined` when the denominator is empty.
+ *
+ *   metric            | degenerate input                   | result
+ *   ------------------|------------------------------------|-------------------------------
+ *   evidencePrecision | no judgeable evidence (total = 0)  | evaluable: false, no precision
+ *   pathAccuracy      | empty expected chain (total = 0)   | evaluable: false, no accuracy
+ *   adaptation        | either run has no follow-up q.     | evaluable: false, no adapted
+ *   hallucination     | no mentioned symbols (total = 0)   | evaluable: false, no ratio
+ *   judge agreement   | no samples (total = 0)             | evaluable: false, no agreement
+ *   sessionCost       | (no ratio)                         | always evaluable
+ *
+ * An empty run (0 turns), a degraded recap (agent failed to decide) and a
+ * failed session (`endedPhase: "error"`) all collapse to one of the empty-
+ * denominator rows above: they contribute no evidence, no follow-up question
+ * and (usually) no conclusion symbols.
  */
 
 import type { Evidence } from "../domain/index.js";
@@ -34,7 +55,9 @@ export interface PrecisionResult {
   failures: PrecisionFailure[];
   /** Not-applicable items, kept verbatim for human review. */
   notApplicableDetails: PrecisionFailure[];
-  precision: number;
+  /** `supported / total`; `undefined` when there is no judgeable evidence. */
+  precision?: number;
+  evaluable: boolean;
 }
 
 /**
@@ -73,7 +96,8 @@ export function evidencePrecision(
     notApplicable: notApplicableDetails.length,
     failures,
     notApplicableDetails,
-    precision: total === 0 ? 0 : supported / total,
+    precision: total === 0 ? undefined : supported / total,
+    evaluable: total > 0,
   };
 }
 
@@ -111,7 +135,9 @@ export interface PathAccuracyResult {
   actual: string[];
   matched: number;
   total: number;
-  accuracy: number;
+  /** `matched / total`; `undefined` when the expected chain is empty. */
+  accuracy?: number;
+  evaluable: boolean;
 }
 
 /** Evidence paths in appearance order, deduped (the session's call chain). */
@@ -152,7 +178,8 @@ export function pathAccuracy(run: EvalRun, expected: CallChainStep[]): PathAccur
     actual,
     matched,
     total,
-    accuracy: total === 0 ? 0 : matched / total,
+    accuracy: total === 0 ? undefined : matched / total,
+    evaluable: total > 0,
   };
 }
 
@@ -163,10 +190,17 @@ export function pathAccuracy(run: EvalRun, expected: CallChainStep[]): PathAccur
 export interface AdaptationResult {
   afterCorrect: string;
   afterIncorrect: string;
-  jaccard: number;
-  sameQuestion: boolean;
-  adapted: boolean;
+  /** Token-set Jaccard similarity; `undefined` when not evaluable. */
+  jaccard?: number;
+  /** Whether the two follow-ups are the identical sentence; `undefined` when not evaluable. */
+  sameQuestion?: boolean;
+  /** `jaccard < threshold`; `undefined` when not evaluable. */
+  adapted?: boolean;
   threshold: number;
+  /** False when either run has no follow-up question to compare. */
+  evaluable: boolean;
+  /** Why the run was not evaluable (which side had no follow-up question). */
+  reason?: string;
 }
 
 export const DEFAULT_ADAPTATION_THRESHOLD = 0.5;
@@ -199,6 +233,10 @@ export function questionJaccard(a: string, b: string): number {
  * Feed the same question a correct and an incorrect answer in two runs, then
  * compare the next question each run produced. A Jaccard similarity below the
  * threshold (and not the identical sentence) means the model adapted.
+ *
+ * The comparison needs a follow-up question from BOTH runs: when either side
+ * ended early, degraded to a recap, or failed without asking again, there is no
+ * question to compare and the result is not evaluable (no `adapted` verdict).
  */
 export function adaptation(
   afterCorrect: EvalRun,
@@ -207,11 +245,24 @@ export function adaptation(
   incorrectAnswer: string,
   threshold: number = DEFAULT_ADAPTATION_THRESHOLD,
 ): AdaptationResult {
-  const correctNext = nextQuestionAfter(afterCorrect, correctAnswer) ?? "";
-  const incorrectNext = nextQuestionAfter(afterIncorrect, incorrectAnswer) ?? "";
+  const correctNext = nextQuestionAfter(afterCorrect, correctAnswer);
+  const incorrectNext = nextQuestionAfter(afterIncorrect, incorrectAnswer);
+
+  if (correctNext === undefined || incorrectNext === undefined) {
+    const missing: string[] = [];
+    if (correctNext === undefined) missing.push("correct answer");
+    if (incorrectNext === undefined) missing.push("incorrect answer");
+    return {
+      afterCorrect: correctNext ?? "",
+      afterIncorrect: incorrectNext ?? "",
+      threshold,
+      evaluable: false,
+      reason: `no follow-up question after the ${missing.join(" or ")}`,
+    };
+  }
+
   const jaccard = questionJaccard(correctNext, incorrectNext);
   const sameQuestion =
-    correctNext !== "" &&
     tokenize(correctNext).join(" ") === tokenize(incorrectNext).join(" ");
   return {
     afterCorrect: correctNext,
@@ -220,6 +271,7 @@ export function adaptation(
     sameQuestion,
     adapted: jaccard < threshold,
     threshold,
+    evaluable: true,
   };
 }
 
@@ -232,7 +284,9 @@ export interface HallucinationResult {
   missing: string[];
   total: number;
   missingCount: number;
-  ratio: number;
+  /** `missingCount / total`; `undefined` when no symbols were mentioned. */
+  ratio?: number;
+  evaluable: boolean;
 }
 
 /**
@@ -258,7 +312,8 @@ export async function hallucination(
     missing,
     total,
     missingCount: missing.length,
-    ratio: total === 0 ? 0 : missing.length / total,
+    ratio: total === 0 ? undefined : missing.length / total,
+    evaluable: total > 0,
   };
 }
 
