@@ -1,0 +1,7 @@
+{
+  "name": "@mc/cli",
+  "version": "0.1.0",
+  "bin": {
+    "mc": "src/index.ts"
+  }
+}

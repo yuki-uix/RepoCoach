@@ -1,11 +1,10 @@
 /**
  * Feature-candidate providers.
  *
- * Candidate *generation* is issue #10 and not implemented here. This module
- * defines the `CandidateProvider` seam the CLI depends on plus two stand-ins:
- * a fixture provider that reads the pre-authored candidate list for the local
- * fixture repo, and a placeholder that guesses a single provisional candidate
- * from the entry file for any other repository. See docs/architecture.md §3.
+ * The `CandidateProvider` seam the CLI drives. The fixture provider reads the
+ * pre-authored candidate list for the local fixture repo; the generated
+ * provider runs real candidate generation (issue #10) — `HeuristicCandidateGenerator`
+ * by default, or an injected generator (e.g. the model-driven one) for tests.
  */
 
 import { readFileSync } from "node:fs";
@@ -15,10 +14,21 @@ import {
   type FeatureCandidate,
 } from "../domain/index.js";
 import type { Reader, Repository } from "../reader/index.js";
+import type { CandidateGenerator } from "../candidates/index.js";
+import { HeuristicCandidateGenerator } from "../candidates/heuristic.js";
+import { buildRepositoryImport, narrowToWorkspace } from "../import/index.js";
 
-/** Seam producing the learning candidates for a repository (replaced by #10). */
+/** Optional monorepo narrowing — candidates are scoped to this workspace. */
+export interface CandidateScope {
+  workspacePath?: string;
+}
+
+/** Seam producing the learning candidates for a repository. */
 export interface CandidateProvider {
-  listCandidates(repo: Repository): FeatureCandidate[];
+  listCandidates(
+    repo: Repository,
+    scope?: CandidateScope,
+  ): Promise<FeatureCandidate[]>;
 }
 
 /**
@@ -30,7 +40,7 @@ export interface CandidateProvider {
 export class FixtureCandidateProvider implements CandidateProvider {
   constructor(private readonly candidatesPath: string) {}
 
-  listCandidates(): FeatureCandidate[] {
+  async listCandidates(): Promise<FeatureCandidate[]> {
     const raw = readFileSync(this.candidatesPath, "utf8");
     let parsed: unknown;
     try {
@@ -47,47 +57,38 @@ export class FixtureCandidateProvider implements CandidateProvider {
   }
 }
 
-const ENTRY_CANDIDATES = [
-  "src/index.ts",
-  "src/index.tsx",
-  "src/index.js",
-  "src/index.mjs",
-  "index.ts",
-  "index.js",
-  "src/main.ts",
-  "src/main.js",
-];
+/** Runs a real generator over the imported repository (optionally scoped). */
+export class GeneratedCandidateProvider implements CandidateProvider {
+  private readonly generator: CandidateGenerator;
 
-/**
- * Provisional single-candidate provider for non-fixture repositories. Guesses
- * one candidate from the entry file; issue #10 replaces this with real
- * candidate generation.
- */
-export class PlaceholderProvider implements CandidateProvider {
-  constructor(private readonly reader: Reader) {}
-
-  listCandidates(repo: Repository): FeatureCandidate[] {
-    const entryFile = guessEntryFile(this.reader, repo);
-    return [
-      {
-        id: "provisional-entry-point",
-        title: "Entry-point walkthrough",
-        description:
-          "Auto-guessed from the repository's entry file (provisional — candidate generation is issue #10).",
-        entryFiles: entryFile === undefined ? [] : [entryFile],
-        difficulty: "intro",
-      },
-    ];
+  constructor(
+    private readonly reader: Reader,
+    generator?: CandidateGenerator,
+  ) {
+    this.generator = generator ?? new HeuristicCandidateGenerator();
   }
-}
 
-/** Guess a repository entry file from the readable tree (index → first source). */
-function guessEntryFile(reader: Reader, repo: Repository): string | undefined {
-  const paths = reader.getTree(repo).map((entry) => entry.path);
-  for (const candidate of ENTRY_CANDIDATES) {
-    if (paths.includes(candidate)) {
-      return candidate;
+  async listCandidates(
+    repo: Repository,
+    scope?: CandidateScope,
+  ): Promise<FeatureCandidate[]> {
+    const imp = buildRepositoryImport(this.reader, repo);
+    let tree = imp.tree;
+    let entryCandidates = imp.entryCandidates;
+    let workspacePath: string | undefined;
+    if (scope?.workspacePath !== undefined) {
+      workspacePath = scope.workspacePath;
+      const narrowed = narrowToWorkspace(imp, workspacePath);
+      tree = narrowed.tree;
+      entryCandidates = narrowed.entryCandidates;
     }
+    return this.generator.generate({
+      reader: this.reader,
+      repo,
+      tree,
+      entryCandidates,
+      packageInfo: imp.packageInfo,
+      workspacePath,
+    });
   }
-  return paths.find((path) => /\.(?:ts|tsx|js|jsx|mjs)$/.test(path));
 }

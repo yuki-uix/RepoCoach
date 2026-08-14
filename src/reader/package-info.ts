@@ -27,6 +27,12 @@ export interface PackageInfo {
   dependencies: string[];
   /** Workspace globs / package paths (monorepo). */
   workspaces: string[];
+  /**
+   * Entry paths named by `main` / `module` / `exports` / `bin`, in priority
+   * order. Raw package.json-relative strings (e.g. `./src/index.js`); they are
+   * normalised and checked against the tree by the import layer, not here.
+   */
+  entryPoints: string[];
 }
 
 export function getPackageInfo(
@@ -60,12 +66,62 @@ export function getPackageInfo(
     scripts: objectKeys(pkg.scripts),
     dependencies: collectDependencyKeys(pkg),
     workspaces: parseWorkspaces(pkg.workspaces),
+    entryPoints: extractEntryPoints(pkg),
   };
 }
 
+/**
+ * Resolve the entry paths a package's `package.json` names: `main` and
+ * `module` first, then the `.` subpath of `exports` (string form, or the
+ * `import`/`default`/`require` conditions), then every `bin` target. Only the
+ * raw strings are returned — no file access happens here.
+ */
+export function extractEntryPoints(pkg: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const field of ["main", "module"]) {
+    const value = pkg[field];
+    if (typeof value === "string" && value !== "") {
+      out.push(value);
+    }
+  }
+
+  const exportsValue = pkg.exports;
+  if (typeof exportsValue === "string" && exportsValue !== "") {
+    out.push(exportsValue);
+  } else if (isRecord(exportsValue)) {
+    const dot = exportsValue["."];
+    if (typeof dot === "string" && dot !== "") {
+      out.push(dot);
+    } else if (isRecord(dot)) {
+      for (const condition of ["import", "default", "require"]) {
+        const value = dot[condition];
+        if (typeof value === "string" && value !== "") {
+          out.push(value);
+        }
+      }
+    }
+  }
+
+  const bin = pkg.bin;
+  if (typeof bin === "string" && bin !== "") {
+    out.push(bin);
+  } else if (isRecord(bin)) {
+    for (const value of Object.values(bin)) {
+      if (typeof value === "string" && value !== "") {
+        out.push(value);
+      }
+    }
+  }
+  return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function objectKeys(value: unknown): string[] {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return Object.keys(value as Record<string, unknown>);
+  if (isRecord(value)) {
+    return Object.keys(value);
   }
   return [];
 }

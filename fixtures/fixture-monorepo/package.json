@@ -1,0 +1,7 @@
+{
+  "name": "mc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal pnpm workspace fixture for RepoCoach monorepo import (data only, never installed).",
+  "workspaces": ["packages/*"]
+}

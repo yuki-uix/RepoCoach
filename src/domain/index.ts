@@ -83,6 +83,13 @@ export const learningSessionSchema = z.object({
   id: z.string(),
   repositoryId: z.string(),
   featureId: z.string(),
+  /**
+   * Selected workspace directory (monorepo). Persisted so a resumed session
+   * re-scopes candidates to the same package instead of falling back to the
+   * whole repository. Optional for backward compatibility with session files
+   * written before workspace scoping was persisted.
+   */
+  workspacePath: z.string().optional(),
   phase: phaseSchema,
   /** Number of questions asked so far (prediction + follow-ups). */
   turnCount: z.number().int().nonnegative(),
