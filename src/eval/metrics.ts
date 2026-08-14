@@ -10,7 +10,7 @@
 
 import type { Evidence } from "../domain/index.js";
 import type { Reader, Repository } from "../reader/index.js";
-import type { AnswerSample, CallChainStep } from "./fixtures.js";
+import type { CallChainStep } from "./fixtures.js";
 import type { EvalRun } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -154,103 +154,6 @@ export function pathAccuracy(run: EvalRun, expected: CallChainStep[]): PathAccur
     total,
     accuracy: total === 0 ? 0 : matched / total,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Assessment agreement
-// ---------------------------------------------------------------------------
-
-export interface AgreementDisagreement {
-  question: string;
-  answer: string;
-  expected: string;
-  actual: string;
-}
-
-/** Annotation labels from `answer-samples.json` (rows of the confusion matrix). */
-export const ASSESSMENT_LABELS = ["correct", "partial", "incorrect"] as const;
-export type AssessmentLabel = (typeof ASSESSMENT_LABELS)[number];
-
-/** Model assessment labels (columns of the confusion matrix). */
-export const MODEL_ASSESSMENT_LABELS = ["correct", "partial", "incorrect", "unknown"] as const;
-export type ModelAssessmentLabel = (typeof MODEL_ASSESSMENT_LABELS)[number];
-
-/** Annotation (row) × model assessment (column) counts. */
-export type ConfusionMatrix = Record<string, Record<string, number>>;
-
-export interface AssessmentAgreementResult {
-  matched: number;
-  agreed: number;
-  total: number;
-  agreement: number;
-  disagreements: AgreementDisagreement[];
-  /** Annotation (row) × model assessment (column) counts. */
-  confusion: ConfusionMatrix;
-}
-
-/**
- * For every sample answer actually assessed this run, compare the model's
- * assessment to the annotated `expectedAssessment`. `agreement` is the AC ratio
- * (threshold ≥ 80% per docs/mvp-spec.md §8). The `confusion` matrix shows the
- * full annotation × model distribution so a systematic bias (e.g. the model
- * grading more conservatively than the annotations) is visible at a glance.
- *
- * An assessment does not always sit on the same turn as the answer it judges:
- * the hypothesis → trace transition consumes the answer, and the trace turn
- * (which carries no `userAnswer`) records the assessment. Pair each assessment
- * with the most recent `userAnswer` seen up to that turn, mirroring the
- * answer→assessment flow through the state machine.
- */
-export function assessmentAgreement(
-  run: EvalRun,
-  samples: AnswerSample[],
-): AssessmentAgreementResult {
-  const byAnswer = new Map(
-    samples.map((sample) => [sample.userAnswer.trim(), sample]),
-  );
-  let matched = 0;
-  let agreed = 0;
-  const disagreements: AgreementDisagreement[] = [];
-  const confusion = emptyConfusion();
-  let lastUserAnswer: string | undefined;
-  for (const turn of run.turns) {
-    if (turn.userAnswer !== undefined) lastUserAnswer = turn.userAnswer;
-    if (turn.assessment === undefined || lastUserAnswer === undefined) continue;
-    const sample = byAnswer.get(lastUserAnswer.trim());
-    if (sample === undefined) continue;
-    matched += 1;
-    confusion[sample.expectedAssessment][turn.assessment] += 1;
-    if (turn.assessment === sample.expectedAssessment) {
-      agreed += 1;
-    } else {
-      disagreements.push({
-        question: sample.question,
-        answer: sample.userAnswer,
-        expected: sample.expectedAssessment,
-        actual: turn.assessment,
-      });
-    }
-  }
-  return {
-    matched,
-    agreed,
-    total: matched,
-    agreement: matched === 0 ? 0 : agreed / matched,
-    disagreements,
-    confusion,
-  };
-}
-
-/** A confusion matrix pre-filled with zeros for every annotation × model cell. */
-function emptyConfusion(): ConfusionMatrix {
-  const table: ConfusionMatrix = {};
-  for (const label of ASSESSMENT_LABELS) {
-    table[label] = {};
-    for (const modelLabel of MODEL_ASSESSMENT_LABELS) {
-      table[label][modelLabel] = 0;
-    }
-  }
-  return table;
 }
 
 // ---------------------------------------------------------------------------

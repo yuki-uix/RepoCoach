@@ -1,11 +1,12 @@
 /**
  * Eval CLI orchestration — assembles the real graph once, imports the fixture,
  * runs the primary session plus the two adaptation sessions, scores every
- * metric, and emits the report (human table on stdout, stable JSON on disk).
+ * live-session metric, then runs the isolated judge eval over the annotated
+ * samples, and emits the report (human table on stdout, stable JSON on disk).
  *
  * `mock` uses the deterministic scripted provider; `real` builds the DeepSeek
- * provider from `.env.local`. Both share the same runner and metrics — only the
- * provider differs.
+ * provider from `.env.local`. Both share the same runner, metrics and judge
+ * harness — only the provider differs.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -22,10 +23,10 @@ import {
   loadAnswerSamples,
   loadCallChain,
 } from "./fixtures.js";
+import { judgeSamples } from "./judge.js";
 import { createMockEvalProvider } from "./mock-provider.js";
 import {
   adaptation,
-  assessmentAgreement,
   evidencePrecision,
   hallucination,
   pathAccuracy,
@@ -120,7 +121,6 @@ export async function runEval(
       metrics: {
         evidencePrecision: evidencePrecision(run, asm.reader, repo, knownSymbols),
         pathAccuracy: pathAccuracy(run, callChain),
-        assessmentAgreement: assessmentAgreement(run, samples),
         adaptation: adaptation(
           correctRun,
           incorrectRun,
@@ -135,6 +135,13 @@ export async function runEval(
         ),
         cost: sessionCost(run),
       },
+      judge: await judgeSamples({
+        provider,
+        reader: asm.reader,
+        repo,
+        featureGoal,
+        samples,
+      }),
     });
 
     stdout.write(renderReport(report));

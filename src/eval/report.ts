@@ -2,8 +2,13 @@
  * Eval report — machine-readable JSON + human-readable table.
  *
  * The JSON form is the stable artifact compared across runs (e.g. before/after
- * the #25 cost work); the human form is the terminal table. Every interpolated
- * value in the human table is model- or fixture-sourced (untrusted) and so goes
+ * the #25 cost work); the human form is the terminal table. The JSON carries
+ * the full `run` (every turn's question / answer / assessment / evidence plus
+ * the session usage) so a disagreement can be diagnosed after the fact — the
+ * answer-pairing bug shipped because the report never showed which question the
+ * model actually asked. The human table stays concise and only surfaces the
+ * metric summaries, failure lists and disagreements. Every interpolated value
+ * in the human table is model- or fixture-sourced (untrusted) and so goes
  * through the same terminal-sanitization gate as the rest of the CLI
  * (docs/architecture.md §6): paths/names via `renderInline`, flowing reasons
  * and questions via `neutralizeMarkdown`.
@@ -11,27 +16,23 @@
 
 import { writeFileSync } from "node:fs";
 import { neutralizeMarkdown, renderInline } from "../cli/markdown.js";
-import type { EvalRun } from "./types.js";
-import {
-  ASSESSMENT_LABELS,
-  MODEL_ASSESSMENT_LABELS,
-} from "./metrics.js";
+import { ASSESSMENT_LABELS, MODEL_ASSESSMENT_LABELS } from "./judge.js";
+import type { ConfusionMatrix, JudgeResult } from "./judge.js";
 import type {
   AdaptationResult,
-  AssessmentAgreementResult,
-  ConfusionMatrix,
   CostResult,
   HallucinationResult,
   PathAccuracyResult,
   PrecisionResult,
 } from "./metrics.js";
+import type { EvalRun } from "./types.js";
 
 export type EvalMode = "mock" | "real";
 
+/** The five live-session metrics (assessment agreement lives in judge mode). */
 export interface ReportMetrics {
   evidencePrecision: PrecisionResult;
   pathAccuracy: PathAccuracyResult;
-  assessmentAgreement: AssessmentAgreementResult;
   adaptation: AdaptationResult;
   hallucination: HallucinationResult;
   cost: CostResult;
@@ -44,13 +45,18 @@ export interface EvalReport {
   featureGoal: string;
   endedPhase: string;
   degraded: boolean;
+  /** The complete live session, kept in full for post-hoc diagnosis. */
+  run: EvalRun;
   metrics: ReportMetrics;
+  /** Isolated assessment-agreement measurement (src/eval/judge.ts). */
+  judge: JudgeResult;
 }
 
 export function buildReport(input: {
   mode: EvalMode;
   run: EvalRun;
   metrics: ReportMetrics;
+  judge: JudgeResult;
 }): EvalReport {
   return {
     mode: input.mode,
@@ -59,7 +65,9 @@ export function buildReport(input: {
     featureGoal: input.run.featureGoal,
     endedPhase: input.run.endedPhase,
     degraded: input.run.degraded,
+    run: input.run,
     metrics: input.metrics,
+    judge: input.judge,
   };
 }
 
@@ -82,6 +90,21 @@ export function renderReport(report: EvalReport): string {
   lines.push(`feature:    ${renderInline(report.featureId)} — ${neutralizeMarkdown(report.featureGoal)}`);
   lines.push(`ended:      ${renderInline(report.endedPhase)}${report.degraded ? " (degraded)" : ""}`);
   lines.push("");
+
+  appendLiveSession(lines, metrics);
+  lines.push("");
+  appendJudgeMode(lines, report.judge);
+
+  return `${lines.join("\n")}\n`;
+}
+
+function appendLiveSession(lines: string[], metrics: ReportMetrics): void {
+  lines.push("Live session (evidence-grounded questioning)");
+  lines.push("-".repeat(58));
+  lines.push(
+    "Measures the real question→answer→evidence loop. Assessment agreement is NOT",
+  );
+  lines.push("scored here — it is measured in judge mode below.");
   const precision = metrics.evidencePrecision;
   const notApplicableSuffix =
     precision.notApplicable > 0 ? `  (${precision.notApplicable} not applicable)` : "";
@@ -90,9 +113,6 @@ export function renderReport(report: EvalReport): string {
   );
   lines.push(
     `Path accuracy        ${metrics.pathAccuracy.matched} / ${metrics.pathAccuracy.total}  ${percent(metrics.pathAccuracy.accuracy)}`,
-  );
-  lines.push(
-    `Assessment agreement ${metrics.assessmentAgreement.agreed} / ${metrics.assessmentAgreement.matched}  ${percent(metrics.assessmentAgreement.agreement)}`,
   );
   lines.push(
     `Adaptation           ${metrics.adaptation.adapted ? "adapted" : "not adapted"}  (jaccard ${metrics.adaptation.jaccard.toFixed(3)})`,
@@ -124,25 +144,6 @@ export function renderReport(report: EvalReport): string {
     }
   }
 
-  if (metrics.assessmentAgreement.disagreements.length > 0) {
-    lines.push("");
-    lines.push("Assessment disagreements:");
-    for (const disagreement of metrics.assessmentAgreement.disagreements) {
-      lines.push(
-        `  - ${neutralizeMarkdown(disagreement.question)}: expected ${renderInline(disagreement.expected)}, got ${renderInline(disagreement.actual)}`,
-      );
-    }
-  }
-
-  if (metrics.assessmentAgreement.matched > 0) {
-    lines.push("");
-    lines.push("Assessment confusion (annotation × model):");
-    appendConfusionMatrix(lines, metrics.assessmentAgreement.confusion);
-    lines.push(
-      "Note: annotations are pre-authored in fixtures/expectations/answer-samples.json; a persistent systematic bias may mean the annotations need review, not that the model is unfit.",
-    );
-  }
-
   if (metrics.hallucination.missing.length > 0) {
     lines.push("");
     lines.push("Hallucinated (not found in source):");
@@ -150,8 +151,50 @@ export function renderReport(report: EvalReport): string {
       lines.push(`  - ${renderInline(name)}`);
     }
   }
+}
 
-  return `${lines.join("\n")}\n`;
+function appendJudgeMode(lines: string[], judge: JudgeResult): void {
+  lines.push("Judge mode (isolated assessment agreement)");
+  lines.push("-".repeat(58));
+  lines.push(
+    "Feeds each annotated (question, answer) to the judging function verbatim, so",
+  );
+  lines.push("the model never generates its own question here.");
+  lines.push(
+    `Assessment agreement ${judge.agreed} / ${judge.total}  ${percent(judge.agreement)}`,
+  );
+
+  if (judge.disagreements.length > 0) {
+    lines.push("");
+    lines.push("Assessment disagreements:");
+    for (const disagreement of judge.disagreements) {
+      lines.push(
+        `  - ${questionPair(disagreement.annotatedQuestion, disagreement.modelQuestion)}: expected ${renderInline(disagreement.expected)}, got ${renderInline(disagreement.actual)}`,
+      );
+    }
+  }
+
+  if (judge.total > 0) {
+    lines.push("");
+    lines.push("Assessment confusion (annotation × model):");
+    appendConfusionMatrix(lines, judge.confusion);
+    lines.push(
+      "Note: annotations are pre-authored in fixtures/expectations/answer-samples.json; a persistent systematic bias may mean the annotations need review, not that the model is unfit.",
+    );
+  }
+}
+
+/**
+ * Show the annotated question and the question the model actually saw. They are
+ * identical by construction in judge mode, so this normally prints one line;
+ * if they ever diverge, both are shown explicitly rather than silently
+ * comparing against the wrong question.
+ */
+function questionPair(annotated: string, model: string): string {
+  if (annotated === model) {
+    return neutralizeMarkdown(annotated);
+  }
+  return `annotated "${neutralizeMarkdown(annotated)}" ≠ model saw "${neutralizeMarkdown(model)}"`;
 }
 
 /** Append an aligned annotation × model count table. */

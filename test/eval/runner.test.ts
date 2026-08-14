@@ -38,26 +38,35 @@ describe("eval:mock end to end", () => {
     expect(report.metrics.evidencePrecision.supported).toBe(5);
     expect(report.metrics.evidencePrecision.precision).toBe(1);
     expect(report.metrics.pathAccuracy.accuracy).toBe(1);
-    expect(report.metrics.assessmentAgreement.agreement).toBe(1);
     expect(report.metrics.adaptation.adapted).toBe(true);
     expect(report.metrics.hallucination.missing).toEqual([]);
 
-    // Human report on stdout.
+    // The judge mode reuses the same perfect mock, so agreement is 1.
+    expect(report.judge.agreement).toBe(1);
+    expect(report.judge.total).toBeGreaterThan(0);
+
+    // Human report on stdout shows both eval sections.
     const outText = streams.stdoutText();
     expect(outText).toContain("RepoCoach Eval Report (mock)");
+    expect(outText).toContain("Live session (evidence-grounded questioning)");
     expect(outText).toContain("Evidence precision");
+    expect(outText).toContain("Judge mode (isolated assessment agreement)");
 
-    // Machine-readable JSON written to disk with a stable shape.
+    // Machine-readable JSON written to disk with a stable shape, including the
+    // full run for post-hoc diagnosis.
     const json = JSON.parse(readFileSync(out, "utf8"));
     expect(json.mode).toBe("mock");
     expect(Object.keys(json.metrics)).toEqual([
       "evidencePrecision",
       "pathAccuracy",
-      "assessmentAgreement",
       "adaptation",
       "hallucination",
       "cost",
     ]);
+    expect(Array.isArray(json.run.turns)).toBe(true);
+    expect(json.run.turns.length).toBeGreaterThan(0);
+    expect(json.run.usage).toEqual({ inputTokens: 8, outputTokens: 8 });
+    expect(json.judge.agreement).toBe(1);
   });
 
   it("records deterministic token usage from the mock", async () => {

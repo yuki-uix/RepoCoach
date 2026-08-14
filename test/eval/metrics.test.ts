@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ADAPTATION_THRESHOLD,
   adaptation,
-  assessmentAgreement,
   evidencePrecision,
   extractSymbolNames,
   hallucination,
@@ -12,7 +11,7 @@ import {
   questionJaccard,
   sessionCost,
 } from "../../src/eval/metrics.js";
-import type { AnswerSample, CallChainStep } from "../../src/eval/fixtures.js";
+import type { CallChainStep } from "../../src/eval/fixtures.js";
 import { makeEvalRun, makeTempRepo, makeTurn } from "./helpers";
 
 const SYMBOLS = ["createTracker", "parseTask", "validate", "add", "formatTask"];
@@ -157,38 +156,6 @@ describe("pathAccuracy", () => {
     // expected step matches but the second cannot follow it in order.
     expect(result.matched).toBe(1);
     expect(result.accuracy).toBe(0.5);
-  });
-});
-
-describe("assessmentAgreement", () => {
-  const samples: AnswerSample[] = [
-    { question: "q1", userAnswer: "full chain answer", expectedAssessment: "correct", rationale: "" },
-    { question: "q2", userAnswer: "wrong answer", expectedAssessment: "incorrect", rationale: "" },
-  ];
-
-  it("counts agreement over assessed sample answers", () => {
-    const run = makeEvalRun({
-      turns: [
-        // The answer-transition turn carries the answer but no assessment.
-        makeTurn({ userAnswer: "full chain answer" }),
-        // The trace turn assesses the previous turn's answer (no userAnswer).
-        makeTurn({ assessment: "correct" }),
-        // The follow-up answer and its assessment land on the same turn.
-        makeTurn({ userAnswer: "wrong answer", assessment: "partial" }),
-      ],
-    });
-
-    const result = assessmentAgreement(run, samples);
-
-    expect(result.matched).toBe(2);
-    expect(result.agreed).toBe(1);
-    expect(result.agreement).toBe(0.5);
-    expect(result.disagreements).toHaveLength(1);
-    // The confusion matrix shows the annotation × model distribution.
-    expect(result.confusion.correct.correct).toBe(1);
-    expect(result.confusion.incorrect.partial).toBe(1);
-    expect(result.confusion.incorrect.incorrect).toBe(0);
-    expect(result.confusion.correct.unknown).toBe(0);
   });
 });
 

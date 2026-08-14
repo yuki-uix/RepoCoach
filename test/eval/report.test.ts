@@ -5,6 +5,7 @@ import {
   serializeReport,
   type ReportMetrics,
 } from "../../src/eval/report.js";
+import type { JudgeResult } from "../../src/eval/judge.js";
 import { makeEvalRun } from "./helpers";
 
 function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
@@ -18,18 +19,6 @@ function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
       precision: 1,
     },
     pathAccuracy: { expected: [], actual: [], matched: 0, total: 0, accuracy: 1 },
-    assessmentAgreement: {
-      matched: 2,
-      agreed: 2,
-      total: 2,
-      agreement: 1,
-      disagreements: [],
-      confusion: {
-        correct: { correct: 2, partial: 0, incorrect: 0, unknown: 0 },
-        partial: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
-        incorrect: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
-      },
-    },
     adaptation: {
       afterCorrect: "a",
       afterIncorrect: "b",
@@ -44,27 +33,92 @@ function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
   };
 }
 
+function judge(overrides: Partial<JudgeResult> = {}): JudgeResult {
+  return {
+    total: 2,
+    agreed: 2,
+    agreement: 1,
+    disagreements: [],
+    confusion: {
+      correct: { correct: 2, partial: 0, incorrect: 0, unknown: 0 },
+      partial: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
+      incorrect: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
+    },
+    samples: [
+      {
+        annotatedQuestion: "q1",
+        modelQuestion: "q1",
+        answer: "a1",
+        expected: "correct",
+        actual: "correct",
+        agreed: true,
+        evidence: [],
+        usage: { inputTokens: 1, outputTokens: 1 },
+        wallClockMs: 1,
+      },
+    ],
+    usage: { inputTokens: 1, outputTokens: 1 },
+    wallClockMs: 2,
+    ...overrides,
+  };
+}
+
 describe("report JSON", () => {
-  it("serializes a stable shape for before/after comparison", () => {
-    const report = buildReport({ mode: "mock", run: makeEvalRun(), metrics: metrics() });
+  it("serializes a stable shape including the full run and judge sections", () => {
+    const report = buildReport({ mode: "mock", run: makeEvalRun(), metrics: metrics(), judge: judge() });
     const json = JSON.parse(serializeReport(report));
 
     expect(Object.keys(json).sort()).toEqual(
-      ["degraded", "endedPhase", "featureGoal", "featureId", "metrics", "mode", "repositoryPath"].sort(),
+      [
+        "degraded",
+        "endedPhase",
+        "featureGoal",
+        "featureId",
+        "judge",
+        "metrics",
+        "mode",
+        "repositoryPath",
+        "run",
+      ].sort(),
     );
     expect(Object.keys(json.metrics)).toEqual([
       "evidencePrecision",
       "pathAccuracy",
-      "assessmentAgreement",
       "adaptation",
       "hallucination",
       "cost",
     ]);
     expect(typeof json.metrics.evidencePrecision.precision).toBe("number");
     expect(typeof json.metrics.evidencePrecision.notApplicable).toBe("number");
-    expect(typeof json.metrics.assessmentAgreement.confusion).toBe("object");
     expect(typeof json.metrics.cost.wallClockMs).toBe("number");
     expect(typeof json.metrics.adaptation.adapted).toBe("boolean");
+    expect(typeof json.judge.agreement).toBe("number");
+    expect(typeof json.judge.confusion).toBe("object");
+  });
+
+  it("embeds the complete run (turns, usage) for post-hoc diagnosis", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun({
+        turns: [
+          {
+            phase: "hypothesis",
+            question: "what flows through?",
+            userAnswer: "parse → store",
+            evidence: [],
+          },
+        ],
+        usage: { inputTokens: 7, outputTokens: 3 },
+      }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const json = JSON.parse(serializeReport(report));
+
+    expect(json.run.turns).toHaveLength(1);
+    expect(json.run.turns[0].question).toBe("what flows through?");
+    expect(json.run.turns[0].userAnswer).toBe("parse → store");
+    expect(json.run.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
   });
 });
 
@@ -82,6 +136,7 @@ describe("report rendering (terminal gate)", () => {
           ratio: 1,
         },
       }),
+      judge: judge(),
     });
 
     const out = renderReport(report);
@@ -95,6 +150,7 @@ describe("report rendering (terminal gate)", () => {
       mode: "mock",
       run: makeEvalRun({ repositoryPath: "repo\n## forged" }),
       metrics: metrics(),
+      judge: judge(),
     });
 
     const out = renderReport(report);
@@ -119,6 +175,7 @@ describe("report rendering (terminal gate)", () => {
           precision: 1,
         },
       }),
+      judge: judge(),
     });
 
     const out = renderReport(report);
@@ -128,17 +185,44 @@ describe("report rendering (terminal gate)", () => {
     expect(out).toContain("README.md:3-5");
   });
 
-  it("renders the assessment confusion matrix and its annotation note", () => {
+  it("renders the judge confusion matrix and its annotation note", () => {
     const report = buildReport({
       mode: "mock",
       run: makeEvalRun(),
       metrics: metrics(),
+      judge: judge(),
     });
 
     const out = renderReport(report);
 
+    expect(out).toContain("Judge mode (isolated assessment agreement)");
     expect(out).toContain("Assessment confusion (annotation × model):");
     expect(out).toContain("correct");
     expect(out).toContain("Note: annotations are pre-authored in fixtures/expectations/answer-samples.json");
+  });
+
+  it("shows both questions when a judge disagreement's questions diverge", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun(),
+      metrics: metrics(),
+      judge: judge({
+        agreed: 0,
+        agreement: 0,
+        disagreements: [
+          {
+            annotatedQuestion: "annotated q",
+            modelQuestion: "model q",
+            answer: "a",
+            expected: "correct",
+            actual: "partial",
+          },
+        ],
+      }),
+    });
+
+    const out = renderReport(report);
+
+    expect(out).toContain('annotated "annotated q" ≠ model saw "model q"');
   });
 });

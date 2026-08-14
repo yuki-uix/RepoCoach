@@ -10,10 +10,7 @@ export { runEvalSession } from "./runner.js";
 export type { RunSessionOptions } from "./runner.js";
 
 export {
-  ASSESSMENT_LABELS,
-  MODEL_ASSESSMENT_LABELS,
   adaptation,
-  assessmentAgreement,
   DEFAULT_ADAPTATION_THRESHOLD,
   evidencePrecision,
   extractSymbolNames,
@@ -26,16 +23,24 @@ export {
 } from "./metrics.js";
 export type {
   AdaptationResult,
-  AssessmentAgreementResult,
-  AssessmentLabel,
-  ConfusionMatrix,
   CostResult,
   HallucinationResult,
-  ModelAssessmentLabel,
   PathAccuracyResult,
   PrecisionFailure,
   PrecisionResult,
 } from "./metrics.js";
+
+export { judgeSamples } from "./judge.js";
+export { ASSESSMENT_LABELS, MODEL_ASSESSMENT_LABELS } from "./judge.js";
+export type {
+  AssessmentLabel,
+  ConfusionMatrix,
+  JudgeDisagreement,
+  JudgeResult,
+  JudgeSampleDetail,
+  JudgeSamplesOptions,
+  ModelAssessmentLabel,
+} from "./judge.js";
 
 export { buildReport, renderReport, serializeReport, writeReport } from "./report.js";
 export type { EvalMode, EvalReport, ReportMetrics } from "./report.js";
