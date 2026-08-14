@@ -14,7 +14,8 @@
  * - repo_get_tree   → truncateBytes over the file listing (+ note when cut)
  * - repo_search     → per-match whole-line truncation (+ note), recorder only
  *                     sees the lines actually shown
- * - repo_read_file  → fitSourceLines over the numbered content (+ note)
+ * - repo_read_file  → fitSourceLines over the numbered content, with header and
+ *                     truncation-note bytes reserved up front (+ note)
  * - repo_get_package_info → truncateBytes over the JSON summary (+ note)
  * - repo_save_evidence → truncateBytes over the receipt / rejection string
  * - the outer catch → truncateBytes over `Error: <message>`; the small
@@ -29,6 +30,7 @@ import {
   MAX_TOOL_RESULT_BYTES,
   byteLength,
   fitSourceLines,
+  lineNumberPrefix,
   truncateBytes,
 } from "./limits.js";
 import type { ToolDefinition } from "./provider.js";
@@ -411,20 +413,44 @@ function readFile(
     runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
     return `${header}\n(empty)`;
   }
-  // Trim to whole lines within the byte budget, and record only the lines
-  // actually shown — the model must not be able to cite a truncated tail.
-  const fit = fitSourceLines(slice.content, MAX_TOOL_RESULT_BYTES);
-  runtime.returnRecorder?.record(args.path, slice.startLine, slice.startLine + fit.keptLines - 1);
+  // Reserve the header, the newline, and the truncation note up front, then fit
+  // the *numbered* lines into what remains. The note covers both the normal
+  // "more lines follow" case and the "first line alone blew the cap" case, so
+  // the longer one is reserved and the final string can never exceed the cap.
+  const noteTruncated = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用更小的行号范围重读剩余部分)`;
+  const noteUncitable = `\n(内容已截断：首行即超过 ${MAX_TOOL_RESULT_BYTES} 字节，未完整显示任何一行，此行不可引用)`;
+  const reservedBytes =
+    byteLength(header) +
+    byteLength("\n") +
+    Math.max(byteLength(noteTruncated), byteLength(noteUncitable));
+  const fit = fitSourceLines(
+    slice.content,
+    MAX_TOOL_RESULT_BYTES - reservedBytes,
+    slice.startLine,
+  );
+  // Record only whole lines actually shown — a byte-truncated first line (or a
+  // truncated tail) must not be citable.
+  if (fit.keptLines > 0) {
+    runtime.returnRecorder?.record(
+      args.path,
+      slice.startLine,
+      slice.startLine + fit.keptLines - 1,
+    );
+  }
   const numbered = numberLines(fit.content, slice.startLine);
   if (!fit.truncated) {
     return `${header}\n${numbered}`;
   }
-  return `${header}\n${numbered}\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用更小的行号范围重读剩余部分)`;
+  const note = fit.keptLines === 0 ? noteUncitable : noteTruncated;
+  return `${header}\n${numbered}${note}`;
 }
 
 function numberLines(content: string, startLine: number): string {
+  if (content === "") {
+    return "";
+  }
   return content
     .split("\n")
-    .map((line, index) => `${String(startLine + index).padStart(4)} | ${line}`)
+    .map((line, index) => `${lineNumberPrefix(startLine + index)}${line}`)
     .join("\n");
 }

@@ -36,29 +36,58 @@ export function truncateBytes(
   return { text: slice, truncated: true };
 }
 
+/** The `NNNN | ` prefix `repo_read_file` prepends to a numbered line. */
+export function lineNumberPrefix(lineNumber: number): string {
+  return `${String(lineNumber).padStart(4)} | `;
+}
+
 /**
- * Keep the first whole source lines of `content` that fit in `maxBytes`,
- * accounting for the `NNNN | ` line-numbering prefix `repo_read_file` adds.
- * At least one line is always kept, so a single oversized line is never
- * dropped entirely. Returns the kept content and how many source lines it
- * spans, so the caller can record the *shown* range (grounding honesty).
+ * Keep the first whole source lines of `content` that fit in `maxBytes` once
+ * numbered with the `NNNN | ` prefix `repo_read_file` adds. `maxBytes` covers
+ * the numbered output only (prefixes + newline joiners), so callers reserve
+ * their own header/note bytes first. The per-line prefix is computed exactly
+ * from `startLine`, so a line number wider than four digits is never
+ * under-counted.
+ *
+ * A first line that alone exceeds the budget is byte-truncated (never dropped
+ * whole) and is *not* counted as kept — the model saw only part of it, so it
+ * must not be citable. `keptLines` is the number of whole lines shown (0 when
+ * the first line is truncated), letting the caller record exactly the shown
+ * range.
  */
 export function fitSourceLines(
   content: string,
   maxBytes: number,
+  startLine = 1,
 ): { content: string; keptLines: number; truncated: boolean } {
   const lines = content.split("\n");
   const kept: string[] = [];
   let bytes = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    // "NNNN | " prefix + trailing newline, roughly 8 bytes per line.
-    const lineBytes = byteLength(line) + 8;
-    if (i > 0 && bytes + lineBytes > maxBytes) {
+    const lineBytes = byteLength(lineNumberPrefix(startLine + i)) + byteLength(line);
+
+    if (i === 0) {
+      if (lineBytes <= maxBytes) {
+        kept.push(line);
+        bytes += lineBytes;
+        continue;
+      }
+      // The first line alone exceeds the budget: byte-truncate it and report
+      // nothing as fully shown, so the model can never cite a partial line.
+      const cut = truncateBytes(
+        line,
+        Math.max(maxBytes - byteLength(lineNumberPrefix(startLine)), 0),
+      );
+      return { content: cut.text, keptLines: 0, truncated: true };
+    }
+
+    // One byte for the newline joining this numbered line to the previous one.
+    if (bytes + 1 + lineBytes > maxBytes) {
       return { content: kept.join("\n"), keptLines: kept.length, truncated: true };
     }
     kept.push(line);
-    bytes += lineBytes;
+    bytes += 1 + lineBytes;
   }
   return { content: kept.join("\n"), keptLines: kept.length, truncated: false };
 }
