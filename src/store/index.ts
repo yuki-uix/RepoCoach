@@ -17,9 +17,11 @@ import {
 export interface CreateSessionInput {
   repositoryId: string;
   featureId: string;
+  /** Selected workspace directory (monorepo); absent for a root-scoped session. */
+  workspacePath?: string;
 }
 
-/** Mutable session fields. id / repositoryId / featureId are immutable. */
+/** Mutable session fields. id / repositoryId / featureId / workspacePath are immutable. */
 export type SessionPatch = Partial<
   Pick<LearningSession, "phase" | "turnCount" | "status" | "usage">
 >;
@@ -56,6 +58,9 @@ export class InMemorySessionStore implements SessionStore {
       id: randomUUID(),
       repositoryId: input.repositoryId,
       featureId: input.featureId,
+      ...(input.workspacePath === undefined
+        ? {}
+        : { workspacePath: input.workspacePath }),
       phase: "orientation",
       turnCount: 0,
       status: "active",

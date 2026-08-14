@@ -125,6 +125,9 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
     const session = asm.store.createSession({
       repositoryId: repositoryIdWithSha(repo),
       featureId: candidate.id,
+      ...(scope.workspacePath === undefined
+        ? {}
+        : { workspacePath: scope.workspacePath }),
     });
     const runner = buildRunner(asm, repo, session.id, featureGoal(candidate), prompt.question);
     const outcome = await runner.run();
@@ -153,7 +156,14 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
         );
       }
     }
-    const candidates = await asm.candidateProvider.listCandidates(repo);
+    // Rebuild the same scope the session was started with, so a workspace
+    // narrowed on the first run does not widen to the whole repository (and
+    // risk resolving a same-named candidate from another package) on resume.
+    const scope: CandidateScope =
+      resumed.session.workspacePath === undefined
+        ? {}
+        : { workspacePath: resumed.session.workspacePath };
+    const candidates = await asm.candidateProvider.listCandidates(repo, scope);
     const goal = resolveFeatureGoal(candidates, resumed.session.featureId);
     const runner = buildRunner(asm, repo, resumed.sessionId, goal, prompt.question);
     const outcome = await runner.run();

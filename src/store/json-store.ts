@@ -74,6 +74,9 @@ export class JsonSessionStore implements PersistentSessionStore {
       id: randomUUID(),
       repositoryId: input.repositoryId,
       featureId: input.featureId,
+      ...(input.workspacePath === undefined
+        ? {}
+        : { workspacePath: input.workspacePath }),
       phase: "orientation",
       turnCount: 0,
       status: "active",

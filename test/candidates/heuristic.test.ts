@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,6 +124,75 @@ describe("HeuristicCandidateGenerator", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.id).toBe("repository-walkthrough");
     expect(featureCandidateSchema.safeParse(candidates[0]).success).toBe(true);
+  });
+
+  it("gives distinct ids to the same-named symbol exported from two entry files", async () => {
+    const reader = makeReader();
+    const dir = mkdtempSync(join(tmpdir(), "repocoach-dup-symbol-"));
+    tempDirs.push(dir);
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "dup", version: "0.1.0", main: "a.ts", bin: { cli: "b.ts" } }),
+      "utf8",
+    );
+    writeFileSync(join(dir, "a.ts"), 'export function handler() {\n  return "a";\n}\n', "utf8");
+    writeFileSync(join(dir, "b.ts"), 'export function handler() {\n  return "b";\n}\n', "utf8");
+
+    const repo = await reader.importRepository(dir);
+    const imp = buildRepositoryImport(reader, repo);
+    const generator = new HeuristicCandidateGenerator();
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    const ids = candidates.map((candidate) => candidate.id);
+    expect(ids.length).toBeGreaterThan(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Each id is keyed by its entry file, so find() resolves the right one.
+    for (const candidate of candidates) {
+      const [entryFile] = candidate.entryFiles;
+      expect(entryFile).toBeDefined();
+      expect(candidate.id).toContain(
+        entryFile!.replace(/[^A-Za-z0-9_-]+/g, "-").toLowerCase(),
+      );
+      expect(candidates.find((item) => item.id === candidate.id)).toBe(candidate);
+    }
+  });
+
+  it("appends a sequence when two entry paths slug to the same id", async () => {
+    const reader = makeReader();
+    const dir = mkdtempSync(join(tmpdir(), "repocoach-slug-clash-"));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, "x"));
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "clash", version: "0.1.0", main: "x/y.ts", bin: { cli: "x-y.ts" } }),
+      "utf8",
+    );
+    writeFileSync(join(dir, "x", "y.ts"), 'export function handler() {\n  return "x/y";\n}\n', "utf8");
+    writeFileSync(join(dir, "x-y.ts"), 'export function handler() {\n  return "x-y";\n}\n', "utf8");
+
+    const repo = await reader.importRepository(dir);
+    const imp = buildRepositoryImport(reader, repo);
+    const generator = new HeuristicCandidateGenerator();
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    const ids = candidates.map((candidate) => candidate.id);
+    expect(ids.length).toBeGreaterThan(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const candidate of candidates) {
+      expect(candidates.find((item) => item.id === candidate.id)).toBe(candidate);
+    }
   });
 });
 
