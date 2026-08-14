@@ -1,60 +1,53 @@
 import { describe, expect, it } from "vitest";
 import {
-  codeBlock,
-  escapeFences,
-  escapeHeadings,
   formatEvidence,
   neutralizeMarkdown,
   renderDecision,
   renderQuestion,
   renderRecap,
+  renderUntrustedBlock,
 } from "../../src/cli";
 import type { Evidence, LearningTurn } from "../../src/domain";
 import type { EvidenceStore } from "../../src/evidence";
 import type { Reader, Repository } from "../../src/reader";
 
-describe("escapeHeadings", () => {
-  it("backslash-escapes a leading hash run followed by whitespace", () => {
-    expect(escapeHeadings("## 假段落")).toBe("\\#\\# 假段落");
-    expect(escapeHeadings("# 标题")).toBe("\\# 标题");
-    expect(escapeHeadings("### x")).toBe("\\#\\#\\# x");
+describe("neutralizeMarkdown", () => {
+  it("adds a single leading space before a column-0 heading hash run", () => {
+    expect(neutralizeMarkdown("## 假段落")).toBe(" ## 假段落");
+    expect(neutralizeMarkdown("# 标题")).toBe(" # 标题");
+    expect(neutralizeMarkdown("### x")).toBe(" ### x");
   });
 
-  it("neutralizes headings indented up to three spaces (CommonMark)", () => {
-    expect(escapeHeadings("   ## indented")).toBe("   \\#\\# indented");
-    // Four spaces is a code block, not a heading — leave it alone.
-    expect(escapeHeadings("    ## code block")).toBe("    ## code block");
+  it("neutralizes only the heading line, leaving other lines intact", () => {
+    const out = neutralizeMarkdown("## 假段落\n```\ncode\n```");
+    expect(out).toBe(" ## 假段落\n```\ncode\n```");
   });
 
   it("leaves non-heading hash runs alone", () => {
-    expect(escapeHeadings("##NoSpace")).toBe("##NoSpace");
-    expect(escapeHeadings("####### seven hashes")).toBe("####### seven hashes");
+    expect(neutralizeMarkdown("##NoSpace")).toBe("##NoSpace");
+    expect(neutralizeMarkdown("####### seven hashes")).toBe("####### seven hashes");
+    expect(neutralizeMarkdown("   ## indented")).toBe("   ## indented");
+  });
+
+  it("introduces no backslash escape noise", () => {
+    expect(neutralizeMarkdown("## 假段落\n```")).not.toContain("\\");
   });
 });
 
-describe("escapeFences", () => {
-  it("backslash-escapes runs of three or more backticks", () => {
-    expect(escapeFences("```")).toBe("\\`\\`\\`");
-    expect(escapeFences("````")).toBe("\\`\\`\\`\\`");
+describe("renderUntrustedBlock", () => {
+  it("indents every line behind │ and dims the whole block", () => {
+    const out = renderUntrustedBlock("## heading\n```\ncode\n```");
+    expect(out).toContain("\x1b[2m");
+    expect(out).toContain("\x1b[2m│ ## heading");
+    expect(out).toContain("│ ```");
+    expect(out).toContain("│ code");
+    // No content line sits at column 0 — every one carries the prefix.
+    expect(out).not.toContain("\n## heading");
+    expect(out).not.toContain("\n```");
   });
 
-  it("leaves inline-code backticks (one or two) alone", () => {
-    expect(escapeFences("`inline` and ``double``")).toBe("`inline` and ``double``");
-  });
-});
-
-describe("neutralizeMarkdown", () => {
-  it("neutralizes headings and fences together", () => {
-    const out = neutralizeMarkdown("## 假段落\n```\ncode\n```");
-    expect(out).toBe("\\#\\# 假段落\n\\`\\`\\`\ncode\n\\`\\`\\`");
-  });
-});
-
-describe("codeBlock", () => {
-  it("wraps content in a fence and escapes internal fences", () => {
-    expect(codeBlock("## heading\n```\ncode\n```")).toBe(
-      "```\n## heading\n\\`\\`\\`\ncode\n\\`\\`\\`\n```",
-    );
+  it("emits no backslash escape noise", () => {
+    expect(renderUntrustedBlock("## heading\n```\ncode\n```")).not.toMatch(/\\[#`]/);
   });
 });
 
@@ -65,7 +58,7 @@ describe("recap markdown neutralization", () => {
     endLine: 3,
     reason: "# 标题 forged reason",
   };
-  const SOURCE_CONTENT = "```\nconst x = 1;\n```";
+  const SOURCE_CONTENT = "## 假段落\n```\nconst x = 1;\n```";
 
   function fakeStore(): EvidenceStore {
     return {
@@ -125,22 +118,29 @@ describe("recap markdown neutralization", () => {
     ]);
   });
 
-  it("escapes forged headings and fences in feedback, reason and source", () => {
+  it("indents forged headings/fences in feedback, reason and source", () => {
     const out = recap();
-    // Feedback headings/fences and the evidence reason are neutralized…
-    expect(out).toContain("\\#\\# 假段落");
-    expect(out).toContain("\\#\\# 假追问");
-    expect(out).toContain("\\# 标题 forged reason");
-    // …and the source context's own fence is escaped inside our code block.
-    expect(out).toContain("\\`\\`\\`");
+    // Flowing untrusted text gets a leading space before a forged heading…
+    expect(out).toContain(" # 标题 forged reason");
+    expect(out).toContain("? —  ## 假段落");
+    expect(out).toContain(" ## 假追问");
+    // …and the source context block is indented behind the │ prefix, so its
+    // heading and fence never sit at column 0.
+    expect(out).toContain("│ ## 假段落");
+    expect(out).toContain("│ ```");
+    expect(out).toContain("│ const x = 1;");
+  });
+
+  it("emits no backslash escape noise anywhere", () => {
+    expect(recap()).not.toMatch(/\\[#`]/);
   });
 });
 
 describe("session-runner markdown neutralization", () => {
   it("neutralizes the question", () => {
     const out = renderQuestion("## 假问题");
-    expect(out).toContain("\\#\\# 假问题");
-    expect(out).not.toContain("## 假问题");
+    expect(out).toContain(" ## 假问题");
+    expect(out).not.toContain("\n## 假问题");
   });
 
   it("neutralizes mid-session feedback", () => {
@@ -148,7 +148,7 @@ describe("session-runner markdown neutralization", () => {
       { evidence: [], nextAction: "ask", feedback: "# 假反馈" },
       false,
     );
-    expect(out).toContain("\\# 假反馈");
+    expect(out).toContain(" # 假反馈");
     expect(out).not.toMatch(/^# 假反馈/m);
   });
 
@@ -159,6 +159,6 @@ describe("session-runner markdown neutralization", () => {
       endLine: 2,
       reason: "## 假证据",
     });
-    expect(out).toBe("src/a.ts:1-2 — \\#\\# 假证据");
+    expect(out).toBe("src/a.ts:1-2 —  ## 假证据");
   });
 });

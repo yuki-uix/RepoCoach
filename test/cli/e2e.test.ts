@@ -139,4 +139,41 @@ describe("CLI start (end to end)", () => {
     expect(selfAssessment?.evidence).toEqual([]);
     expect(EVIDENCE).toHaveLength(5);
   });
+
+  it("treats stdin EOF at the self-assessment as unanswered and exits 0", async () => {
+    const dataDir = makeDataDir();
+    const streams = capturedStreams();
+    // Every turn is answered; stdin ends before the final self-assessment so
+    // that prompt is answered by EOF, not a line.
+    streams.stdin.write(
+      "1\n" +
+        "parseTask parses it, validate checks it, store.add saves it, formatTask renders it.\n" +
+        "parseTask generates the id while splitting the string.\n",
+    );
+    streams.stdin.end();
+
+    const store = new JsonSessionStore(dataDir);
+    const code = await runCli(["start", fixtureRoot], {
+      dataDir,
+      store,
+      provider: scriptedProvider(fullSessionScript()),
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+
+    expect(code).toBe(0);
+    const out = streams.stdoutText();
+    // The recap is fully rendered before the unanswered self-assessment.
+    expect(out).toContain("## 功能调用链");
+    expect(out).toContain("## Session 总耗时");
+
+    const sessions = store.listSessions();
+    expect(sessions).toHaveLength(1);
+    const turns = store.listTurns(sessions[0]!.id);
+    const selfAssessment = turns[turns.length - 1];
+    expect(selfAssessment?.question).toBe("你现在能向别人复述这条链路吗？");
+    expect(selfAssessment?.userAnswer).toBe("");
+    expect(selfAssessment?.evidence).toEqual([]);
+  });
 });

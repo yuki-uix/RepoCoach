@@ -14,7 +14,7 @@ import type { AgentDecision, Evidence } from "../domain/index.js";
 import type { AgentLoopEvent } from "../agent/index.js";
 import { Orchestrator, type StepResult } from "../orchestrator/orchestrator.js";
 import type { SessionStore } from "../store/index.js";
-import { neutralizeMarkdown } from "./markdown.js";
+import { bold, dim, neutralizeMarkdown } from "./markdown.js";
 
 /** Reads one line of user input (the readline `question` seam). */
 export type PromptFn = (query: string) => Promise<string>;
@@ -177,19 +177,8 @@ export class SessionRunner {
 
 }
 
-const ANSI_DIM = "\x1b[2m";
-const ANSI_BOLD = "\x1b[1m";
-const ANSI_RESET = "\x1b[0m";
 /** Width of the separator rule drawn above a question. */
 const QUESTION_RULE_WIDTH = 60;
-
-function dim(text: string): string {
-  return `${ANSI_DIM}${text}${ANSI_RESET}`;
-}
-
-function bold(text: string): string {
-  return `${ANSI_BOLD}${text}${ANSI_RESET}`;
-}
 
 /**
  * Render a turn's evidence (and mid-session feedback) for stdout. The final

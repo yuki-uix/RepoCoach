@@ -11,7 +11,7 @@
 import type { Evidence, LearningTurn } from "../domain/index.js";
 import type { EvidenceStore } from "../evidence/index.js";
 import type { Reader, Repository } from "../reader/index.js";
-import { codeBlock, neutralizeMarkdown } from "./markdown.js";
+import { neutralizeMarkdown, renderUntrustedBlock } from "./markdown.js";
 
 export interface RecapDeps {
   sessionId: string;
@@ -144,7 +144,7 @@ export function renderRecap(deps: RecapDeps): string {
       sections.push(
         `${record.path}:${record.startLine}-${record.endLine} — ${neutralizeMarkdown(record.reason)}`,
       );
-      sections.push(codeBlock(context.content));
+      sections.push(renderUntrustedBlock(context.content));
       sections.push("");
     }
   }

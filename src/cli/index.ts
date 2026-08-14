@@ -46,7 +46,7 @@ export {
   renderRecap,
   splitFeedback,
 } from "./recap.js";
-export { codeBlock, escapeFences, escapeHeadings, neutralizeMarkdown } from "./markdown.js";
+export { neutralizeMarkdown, renderUntrustedBlock } from "./markdown.js";
 
 export type CliDeps = AssembleDeps;
 
@@ -62,6 +62,7 @@ function makePrompt(stdin: Readable, stdout: Writable): Prompt {
   // listener feeding a queue keeps every line regardless of arrival timing.
   const queue: string[] = [];
   const waiters: Array<(line: string) => void> = [];
+  let closed = false;
   rl.on("line", (line) => {
     const waiter = waiters.shift();
     if (waiter !== undefined) {
@@ -70,12 +71,25 @@ function makePrompt(stdin: Readable, stdout: Writable): Prompt {
       queue.push(line);
     }
   });
+  // stdin EOF (Ctrl-D / a scripted stream ending) must release every pending
+  // question instead of leaving the `question()` promise hanging forever — a
+  // hung top-level await turns a clean end-of-input into exit 13. Resolving
+  // with "" is the same "no input" every caller already treats as skip/default.
+  rl.on("close", () => {
+    closed = true;
+    for (const waiter of waiters.splice(0)) {
+      waiter("");
+    }
+  });
   return {
     question(query) {
       stdout.write(query);
       const next = queue.shift();
       if (next !== undefined) {
         return Promise.resolve(next);
+      }
+      if (closed) {
+        return Promise.resolve("");
       }
       return new Promise((resolvePromise) => waiters.push(resolvePromise));
     },
