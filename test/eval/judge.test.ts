@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AgentDecisionInvalidError } from "../../src/agent/index.js";
 import type { ChatProvider } from "../../src/agent/provider.js";
 import type { AnswerSample } from "../../src/eval/fixtures.js";
 import { judgeSamples } from "../../src/eval/judge.js";
@@ -102,6 +103,44 @@ describe("judgeSamples", () => {
     expect(result.confusion.correct.unknown).toBe(1);
     expect(result.confusion.incorrect.unknown).toBe(1);
     expect(result.confusion.partial.unknown).toBe(1);
+  });
+
+  it("aborts rather than report agreement when the provider fails for infrastructure reasons", async () => {
+    const { reader, repo } = makeTempRepo({});
+    const provider: ChatProvider = {
+      async complete() {
+        throw new Error("DeepSeek API error 429: rate limited");
+      },
+    };
+
+    await expect(
+      judgeSamples({ provider, reader, repo, featureGoal: "goal", samples: SAMPLES }),
+    ).rejects.toThrow(/eval interrupted: judge provider error, results not usable/);
+  });
+
+  it("folds the tokens a failed decision spent into the running total", async () => {
+    const { reader, repo } = makeTempRepo({});
+    const provider: ChatProvider = {
+      async complete() {
+        throw new AgentDecisionInvalidError("no valid decision", {
+          inputTokens: 7,
+          outputTokens: 3,
+        });
+      },
+    };
+
+    const result = await judgeSamples({
+      provider,
+      reader,
+      repo,
+      featureGoal: "goal",
+      samples: SAMPLES,
+    });
+
+    expect(result.agreement).toBe(0);
+    expect(result.confusion.correct.unknown).toBe(1);
+    expect(result.usage).toEqual({ inputTokens: 21, outputTokens: 9 });
+    expect(result.samples[0]?.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
   });
 
   it("reports not evaluable when there are no samples", async () => {

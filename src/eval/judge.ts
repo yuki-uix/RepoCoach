@@ -15,7 +15,7 @@
  */
 
 import { performance } from "node:perf_hooks";
-import { AgentLoop } from "../agent/index.js";
+import { AgentDecisionInvalidError, AgentLoop, describeError } from "../agent/index.js";
 import type { ChatProvider } from "../agent/provider.js";
 import type { Assessment, Evidence, TokenUsage } from "../domain/index.js";
 import type { Repository, Reader } from "../reader/index.js";
@@ -108,7 +108,7 @@ export async function judgeSamples(options: JudgeSamplesOptions): Promise<JudgeR
     const expected = sample.expectedAssessment;
     let actual: Assessment = "unknown";
     let evidence: Evidence[] = [];
-    let sampleUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+    let sampleUsage: TokenUsage;
     try {
       const result = await loop.invoke({
         phase: "trace",
@@ -125,9 +125,25 @@ export async function judgeSamples(options: JudgeSamplesOptions): Promise<JudgeR
       actual = result.decision.assessment ?? "unknown";
       evidence = result.decision.evidence;
       sampleUsage = result.usage;
-    } catch {
-      // A judging call that never produced a valid decision is itself a real
-      // disagreement: `actual` stays at its initialized "unknown".
+    } catch (error) {
+      // Only a judging call that never produced a valid decision is a real,
+      // countable measurement: `actual` stays at its initialized "unknown".
+      if (error instanceof AgentDecisionInvalidError) {
+        // The failed calls still spent provider tokens, so fold them into the
+        // running total — otherwise a sample that fails to decide would
+        // under-count cost (same discipline as the orchestrator's retry path).
+        sampleUsage = error.usage;
+      } else {
+        // Anything else (network, auth, rate limit, timeout) is an
+        // infrastructure fault, not a judging outcome. Recording it silently as
+        // "unknown" would make a broken provider look like a merely-inexact
+        // model and emit an agreement number that is really an artifact of the
+        // outage. Abort the eval instead of reporting a fake measurement.
+        throw new Error(
+          `eval interrupted: judge provider error, results not usable: ${describeError(error)}`,
+          { cause: error },
+        );
+      }
     }
 
     usage.inputTokens += sampleUsage.inputTokens;
