@@ -100,6 +100,36 @@ describe("DeepSeekProvider SSE parsing", () => {
     expect(parseChunkLine("")).toBeNull();
     expect(parseChunkLine("not-json")).toBeNull();
   });
+
+  it("records zero usage when the response omits the usage field", async () => {
+    const body = [
+      sseLine({
+        id: "1",
+        choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const provider = makeProvider({ fetchFn: async () => sseResponse(body) });
+
+    const result = await provider.complete({ model: "deepseek-v4-flash", messages: [] });
+
+    expect(result.message.content).toBe("done");
+    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+  });
+});
+
+describe("DeepSeekProvider stream termination", () => {
+  it("throws 'stream truncated' when the stream ends without [DONE]", async () => {
+    const body = sseLine({
+      id: "1",
+      choices: [{ index: 0, delta: { content: "partial" } }],
+    });
+    const provider = makeProvider({ fetchFn: async () => sseResponse(body) });
+
+    await expect(
+      provider.complete({ model: "deepseek-v4-flash", messages: [] }),
+    ).rejects.toThrow(/stream truncated/);
+  });
 });
 
 describe("DeepSeekProvider error handling", () => {

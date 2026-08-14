@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cloneRepo, type GitRunner } from "../../src/reader/clone";
 import { readFileSlice } from "../../src/reader/read-file";
-import { cleanupDir, createTempRepo, runGit } from "./helpers";
+import { cleanupDir, createTempRepo, runGit, writeFiles } from "./helpers";
 
 const tempDirs: string[] = [];
 
@@ -76,7 +76,7 @@ describe("cloneRepo", () => {
     expect(rootDir).toBe(join(cacheRoot, "o", "n", sha));
   });
 
-  it("uses a local path directly without cloning", async () => {
+  it("clones a clean local git root on first import so analysis reads a pinned copy", async () => {
     const repo = await createTempRepo({ "a.txt": "hello\n" });
     tempDirs.push(repo.dir);
     const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
@@ -86,8 +86,26 @@ describe("cloneRepo", () => {
       { kind: "local", path: repo.dir },
       { cacheRoot },
     );
-    expect(rootDir).toBe(repo.dir);
     expect(sha).toBe(repo.sha);
+    // Recording now reads the pinned clone, not the mutable working tree.
+    expect(rootDir).not.toBe(repo.dir);
+    expect(readFileSlice(rootDir, "a.txt").content).toBe("hello");
+  });
+
+  it("uses a subdirectory of a git repo directly without cloning", async () => {
+    const repo = await createTempRepo({ "sub/a.txt": "hello\n" });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const subdir = join(repo.dir, "sub");
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: subdir },
+      { cacheRoot },
+    );
+    // A subdirectory has no reproducible pin, so it keeps working-tree semantics.
+    expect(rootDir).toBe(subdir);
+    expect(sha).toBe("");
   });
 
   it("rejects a ref that looks like a git option before invoking git", async () => {
@@ -138,5 +156,61 @@ describe("cloneRepo", () => {
       });
       expect(sha).toBe(repo.sha);
     }
+  });
+
+  it("does not pin a local root with a readable ignored file", async () => {
+    // The .gitignore is committed, so the tree is clean except for the ignored
+    // file — which the tree walker would still read (it ignores .gitignore).
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "generated.ts\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "generated.ts": "export const x = 1;\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).toBe(repo.dir);
+    expect(sha).toBe("");
+  });
+
+  it("still pins a local root whose ignored entries are excluded directories", async () => {
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "node_modules/\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "node_modules/pkg.js": "x\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).not.toBe(repo.dir);
+    expect(sha).toBe(repo.sha);
+  });
+
+  it("does not pin a local root when an ignored directory holds a readable file", async () => {
+    const repo = await createTempRepo({
+      "tracked.txt": "hello\n",
+      ".gitignore": "generated/\n",
+    });
+    tempDirs.push(repo.dir);
+    writeFiles(repo.dir, { "generated/out.ts": "export const y = 1;\n" });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: repo.dir },
+      { cacheRoot },
+    );
+    expect(rootDir).toBe(repo.dir);
+    expect(sha).toBe("");
   });
 });

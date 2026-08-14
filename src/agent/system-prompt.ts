@@ -44,7 +44,9 @@ const PHASE_INSTRUCTIONS: Record<Phase, string> = {
     "learner has not yet shown. Ground the question in evidence you read. Submit nextAction 'ask'.",
   feedback:
     "Feedback phase: judge the learner's latest answer (assessment), give concise feedback, then " +
-    "either probe deeper (nextAction 'ask') or finish (nextAction 'finish').",
+    "either probe deeper (nextAction 'ask') or finish (nextAction 'finish'). When you finish, use the " +
+    "feedback field for the closing recap: put the interviewer follow-up questions under a line " +
+    "'Follow-up questions:', then the recommended next learning steps under a line 'Next steps:'.",
   recap:
     "Recap phase: summarise the completed learning chain. Submit nextAction 'finish'.",
   error:

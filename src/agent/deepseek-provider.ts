@@ -263,13 +263,22 @@ export async function assembleSseStream(
   const decoder = new TextDecoder();
   const assembler = new SseAssembler();
   let buffer = "";
+  // A stream that ends without the [DONE] sentinel was cut off mid-flight and
+  // its assembled message is incomplete; treat that as an explicit error rather
+  // than returning a partial turn.
+  let sawDone = false;
 
   const processDataLine = (line: string): void => {
     const trimmed = line.trim();
     if (!trimmed.startsWith("data:")) {
       return;
     }
-    const parsed = parseChunkLine(trimmed.slice("data:".length).trim());
+    const payload = trimmed.slice("data:".length).trim();
+    if (payload === "[DONE]") {
+      sawDone = true;
+      return;
+    }
+    const parsed = parseChunkLine(payload);
     if (parsed === null) {
       return;
     }
@@ -296,6 +305,10 @@ export async function assembleSseStream(
   processBuffered();
   if (buffer.trim() !== "") {
     processDataLine(buffer);
+  }
+
+  if (!sawDone) {
+    throw new Error("stream truncated");
   }
 
   return assembler.finish();

@@ -89,7 +89,7 @@ const submitDecisionTool: ToolDefinition = {
   function: {
     name: "submit_decision",
     description:
-      "Submit your structured decision to end the turn. This is the only way to finish.",
+      "Submit your structured decision to end the turn. This is the only way to finish. Before citing package.json or any file content as evidence, you must first repo_read_file that range.",
     parameters: {
       type: "object",
       properties: {

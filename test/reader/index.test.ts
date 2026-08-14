@@ -29,7 +29,8 @@ describe("createReader", () => {
     const reader = createReader({ cacheRoot });
     const imported = await reader.importRepository(repo.dir);
 
-    expect(imported.rootDir).toBe(repo.dir);
+    // A clean local git root is pinned to a clone, so rootDir is not the tree.
+    expect(imported.rootDir).not.toBe(repo.dir);
     expect(imported.sha).toBe(repo.sha);
     expect(imported.meta).toBeNull();
 

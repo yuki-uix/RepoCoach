@@ -323,6 +323,52 @@ describe("session resume (end to end)", () => {
   });
 });
 
+describe("session resume persists token usage across interruption (P1)", () => {
+  it("restores cumulative usage and keeps the budget counting across resumes", async () => {
+    const sessionId = await runToQuestioning(dataDir, async (input) => happyPath(input));
+
+    // The process "crashed": the orchestrator and its in-memory usage are gone.
+    const resumedStore = new JsonSessionStore(dataDir);
+    const resumed = resumeSession(resumedStore, sessionId);
+
+    // Each of the four pre-interruption steps spent one USAGE, and each step
+    // persisted the running total to the session file.
+    const expectedUsage: TokenUsage = {
+      inputTokens: 4 * USAGE.inputTokens,
+      outputTokens: 4 * USAGE.outputTokens,
+    };
+    expect(resumed.session.usage).toEqual(expectedUsage);
+
+    // A resumed orchestrator starts from the persisted usage (assemble passes
+    // session.usage through as initialUsage).
+    let spendBig = false;
+    const orchestrator = new Orchestrator({
+      agent: async (input) => {
+        if (spendBig) {
+          return {
+            decision: decision({ question: "follow-up", nextAction: "ask" }),
+            usage: { inputTokens: 300_000, outputTokens: 0 },
+          };
+        }
+        return happyPath(input);
+      },
+      store: resumedStore,
+      sessionId: resumed.sessionId,
+      featureGoal: resumed.featureGoal,
+      initialUsage: resumed.session.usage,
+    });
+    expect(orchestrator.accumulatedUsage).toEqual(expectedUsage);
+
+    // The next call spends enough to push the cumulative total over the 200k
+    // input-token budget, so the budget stop forces recap across the resume.
+    spendBig = true;
+    const result = await orchestrator.step();
+    expect(result.phase).toBe("recap");
+    expect(result.budgetExceeded).toBe(true);
+    expect(result.decisionOverridden).toBe(true);
+  });
+});
+
 async function runToQuestioning(dataDir: string, agent: AgentInvoker): Promise<string> {
   const store = new JsonSessionStore(dataDir);
   const session = store.createSession({

@@ -8,8 +8,11 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdir, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { isPathExcluded, isReadablePath } from "./filters.js";
+import { getTree } from "./tree.js";
 import type { ParsedRepoUrl } from "./url.js";
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
@@ -84,9 +87,33 @@ export async function cloneRepo(
   const git = opts.git ?? runGit;
 
   if (source.kind === "local") {
-    // Local paths are used directly (fixtures / eval) — no clone, no cache.
-    const sha = await headSha(source.path, git);
-    return { rootDir: source.path, sha };
+    // Local paths are used directly (fixtures / eval) — no clone, no cache,
+    // except when the tree can be pinned to a SHA. Recording and consumption
+    // are symmetric: both read the same immutable clone whenever a SHA exists.
+    //   - recording (opts.ref undefined): `headSha` resolves a SHA only for a
+    //     clean git repo root (no staged/modified/untracked files, no readable
+    //     ignored files). When it does, the first analysis reads that pinned
+    //     clone — a later working-tree edit can no longer change what the
+    //     session analyses. When it returns "" (subdirectory, non-git path,
+    //     dirty tree, readable ignored files), we keep working-tree semantics
+    //     with no pin (the honest degradation is unchanged).
+    //   - consumption (opts.ref set): a resume must import the saved SHA, so we
+    //     clone-and-checkout it. The only precondition is that the path is a git
+    //     repo root; a tree that became dirty after the session was recorded
+    //     must NOT silently fall back to the working tree.
+    if (opts.ref === undefined) {
+      const sha = await headSha(source.path, git);
+      return sha === ""
+        ? { rootDir: source.path, sha }
+        : cloneLocalAtRef(source.path, sha, opts.cacheRoot, git);
+    }
+    if (!(await isGitRoot(source.path, git))) {
+      throw new Error(
+        `Cannot resume local path "${source.path}" at ref "${opts.ref}": ` +
+          `not a git repository root`,
+      );
+    }
+    return cloneLocalAtRef(source.path, opts.ref, opts.cacheRoot, git);
   }
 
   const url = opts.url ?? `https://github.com/${source.owner}/${source.name}.git`;
@@ -167,6 +194,40 @@ function cloneBaseArgs(url: string, branch?: string): string[] {
   return args;
 }
 
+/**
+ * Pin a local git-repo root to a ref via a cheap local clone. A local clone
+ * shares objects with its source (hardlinks), so it is fast and carries the
+ * full history; checking out the SHA is therefore a plain detached `git
+ * checkout`, not the shallow fetch dance used for HTTP remotes.
+ */
+async function cloneLocalAtRef(
+  sourcePath: string,
+  ref: string,
+  cacheRoot: string,
+  git: GitRunner,
+): Promise<CloneResult> {
+  assertSafeRef(ref);
+  const sha = FULL_SHA_RE.test(ref)
+    ? ref.toLowerCase()
+    : (await git(["rev-parse", ref], sourcePath)).trim();
+  await mkdir(cacheRoot, { recursive: true });
+  // A distinct "local" owner segment keeps these checkouts out of the
+  // owner/name/sha namespace used for GitHub clones; the source path is hashed
+  // so the cache key never depends on (or leaks) an arbitrary local path.
+  const cacheDir = join(cacheRoot, "local", localKey(sourcePath), sha);
+  if (await isNonEmptyDir(cacheDir)) {
+    return { rootDir: cacheDir, sha };
+  }
+  await git(["clone", sourcePath, cacheDir]);
+  await git(["checkout", "--detach", sha], cacheDir);
+  return { rootDir: cacheDir, sha };
+}
+
+/** A stable, collision-resistant cache key for a local source path. */
+function localKey(sourcePath: string): string {
+  return createHash("sha1").update(sourcePath).digest("hex");
+}
+
 async function isNonEmptyDir(dir: string): Promise<boolean> {
   try {
     const entries = await readdir(dir);
@@ -176,11 +237,97 @@ async function isNonEmptyDir(dir: string): Promise<boolean> {
   }
 }
 
-/** Resolve the checked-out commit SHA, or "" when the path is not a git repo. */
+/**
+ * Is `path` itself the root of a git repository? Only the top-level comparison
+ * is made here (`git rev-parse --show-toplevel` resolving to `path`); there is
+ * no cleanliness judgment — a dirty root is still a root.
+ */
+async function isGitRoot(path: string, git: GitRunner): Promise<boolean> {
+  try {
+    const topLevel = (await git(["rev-parse", "--show-toplevel"], path)).trim();
+    return (await realpath(topLevel)) === (await realpath(path));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a pin for a local path, or "" when the path has no reproducible
+ * commit to pin (recording only). A clean git repo root is pinnable only when
+ * the working tree holds exactly what HEAD reproduces: no staged, modified, or
+ * untracked files, and no readable ignored files (the tree walker does not read
+ * .gitignore, so a readable ignored text file would be analysed from the
+ * working tree yet absent from a pinned clone). A subdirectory of a repo (or a
+ * non-git path) has no stable pin. The SHA is returned only when every check
+ * passed at that instant.
+ */
 async function headSha(rootDir: string, git: GitRunner): Promise<string> {
   try {
+    if (!(await isGitRoot(rootDir, git))) {
+      return "";
+    }
+    // `--porcelain` is empty exactly when nothing is staged, modified, or
+    // untracked — the only state a HEAD SHA faithfully reproduces.
+    if ((await git(["status", "--porcelain"], rootDir)).trim() !== "") {
+      return "";
+    }
+    if (await hasReadableIgnoredFiles(rootDir, git)) {
+      return "";
+    }
     return (await git(["rev-parse", "HEAD"], rootDir)).trim();
   } catch {
     return "";
   }
+}
+
+/**
+ * Whether the working tree contains an ignored file the Reader would actually
+ * read. `git status` does not report ignored files by default, but the tree
+ * walker ignores .gitignore and reads readable ignored text files (e.g. a
+ * generated.ts), so such a file would be analysed from the working tree yet
+ * absent from a pinned clone — evidence and pinned content would disagree.
+ * Excluded directories (node_modules/, dist/, …) and unreadable ignored files
+ * are skipped, so a repo that merely has an ignored node_modules/ still pins.
+ */
+async function hasReadableIgnoredFiles(
+  rootDir: string,
+  git: GitRunner,
+): Promise<boolean> {
+  const out = await git(
+    ["status", "--porcelain", "--ignored=matching"],
+    rootDir,
+  );
+  for (const line of out.split("\n")) {
+    const entry = parseIgnoredEntry(line);
+    if (entry === null) continue;
+    if (entry.isDir) {
+      // The Reader descends into any directory it does not exclude, so a
+      // readable file under it is analysed from the working tree. Reuse
+      // `getTree` (the same traversal + filters as the analysis path) rather
+      // than reimplementing a subset of the filters.
+      if (isPathExcluded(entry.rel)) continue;
+      if (getTree(join(rootDir, entry.rel)).length > 0) return true;
+    } else if (isReadablePath(entry.rel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Parse one `--porcelain --ignored=matching` line into an ignored entry.
+ * Ignored entries are reported as `!! <path>`; a fully-ignored directory
+ * carries a trailing slash, mirroring the `?? <dir>/` shape used for untracked
+ * directories.
+ */
+function parseIgnoredEntry(
+  line: string,
+): { rel: string; isDir: boolean } | null {
+  if (!line.startsWith("!! ")) return null;
+  const raw = line.slice(3);
+  if (raw === "") return null;
+  if (raw.endsWith("/")) {
+    return { rel: raw.slice(0, -1), isDir: true };
+  }
+  return { rel: raw, isDir: false };
 }

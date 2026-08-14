@@ -105,11 +105,30 @@ RepoCoach 需要逐步实现：
 
 ## 本地开发
 
-应用代码尚未开始搭建。下一步会先完成：
+```bash
+pnpm install
+pnpm test        # 全部单测（mock，不发网络请求）
+pnpm build
+```
 
-1. 初始化 TypeScript 工程；
-2. 建立仓库导入（浅克隆）和只读检索（ripgrep）接口；
-3. 用 fixture repo 跑通第一条 CLI 版 Feature Trace 流程。
+## 运行 CLI
+
+需要仓库根目录有 `.env.local`（一行 `Deepseek_key=<你的 DeepSeek API Key>`）。真实模型为 `deepseek-v4-flash`。
+
+```bash
+# 开始一次学习 Session（GitHub URL 或本地路径；fixture 走本地路径）
+pnpm start -- start ./fixtures/fixture-repo
+
+# 中断（Ctrl-C 或 /quit）后恢复
+pnpm start -- resume <sessionId>
+
+# 列出历史 Session（id、仓库、阶段、耗时）
+pnpm start -- list
+```
+
+- 问答中直接回车 = 跳过本题；输入 `/quit` 提前结束。
+- Session 按轮持久化在 `~/.repocoach`（可用 `--data-dir` 覆盖），Ctrl-C 不丢进度。
+- 等待模型时工具调用过程会流式打印在 stderr。
 
 ## 文档
 

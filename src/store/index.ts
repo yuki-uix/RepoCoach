@@ -21,7 +21,7 @@ export interface CreateSessionInput {
 
 /** Mutable session fields. id / repositoryId / featureId are immutable. */
 export type SessionPatch = Partial<
-  Pick<LearningSession, "phase" | "turnCount" | "status">
+  Pick<LearningSession, "phase" | "turnCount" | "status" | "usage">
 >;
 
 export interface SessionStore {

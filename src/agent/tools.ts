@@ -134,7 +134,7 @@ const repoSaveEvidenceTool: ToolDefinition = {
   function: {
     name: "repo_save_evidence",
     description:
-      "Record a piece of evidence (file path + line range + reason) you retrieved this turn. Only accepted when it passes validation.",
+      "Record a piece of evidence (file path + line range + reason) you retrieved this turn. Only accepted when it passes validation. Before citing package.json or any file content, you must first repo_read_file that range.",
     parameters: {
       type: "object",
       properties: {
