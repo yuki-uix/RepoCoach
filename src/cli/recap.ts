@@ -11,6 +11,7 @@
 import type { Evidence, LearningTurn } from "../domain/index.js";
 import type { EvidenceStore } from "../evidence/index.js";
 import type { Reader, Repository } from "../reader/index.js";
+import { codeBlock, neutralizeMarkdown } from "./markdown.js";
 
 export interface RecapDeps {
   sessionId: string;
@@ -110,7 +111,7 @@ export function renderRecap(deps: RecapDeps): string {
         continue;
       }
       seen.add(record.path);
-      sections.push(`${record.path} — ${record.reason}`);
+      sections.push(`${record.path} — ${neutralizeMarkdown(record.reason)}`);
     }
   }
 
@@ -121,7 +122,7 @@ export function renderRecap(deps: RecapDeps): string {
   sections.push(
     ...(correct.length === 0
       ? ["(无)"]
-      : correct.map((item) => `- ${item.question}${item.feedback ? ` — ${item.feedback}` : ""}`)),
+      : correct.map((item) => renderAssessedItem(item))),
   );
 
   sections.push("## 你混淆的概念");
@@ -131,7 +132,7 @@ export function renderRecap(deps: RecapDeps): string {
   sections.push(
     ...(confused.length === 0
       ? ["(无)"]
-      : confused.map((item) => `- ${item.question}${item.feedback ? ` — ${item.feedback}` : ""}`)),
+      : confused.map((item) => renderAssessedItem(item))),
   );
 
   sections.push("## 重要源码证据");
@@ -141,18 +142,18 @@ export function renderRecap(deps: RecapDeps): string {
     for (const record of records) {
       const context = deps.evidenceStore.getSourceContext(record, deps.reader, deps.repo);
       sections.push(
-        `${record.path}:${record.startLine}-${record.endLine} — ${record.reason}`,
+        `${record.path}:${record.startLine}-${record.endLine} — ${neutralizeMarkdown(record.reason)}`,
       );
-      sections.push(context.content);
+      sections.push(codeBlock(context.content));
       sections.push("");
     }
   }
 
   const { followUp, nextSteps } = splitFeedback(deps.finalFeedback);
   sections.push("## 面试官可能追问");
-  sections.push(followUp === "" ? "(无)" : followUp);
+  sections.push(followUp === "" ? "(无)" : neutralizeMarkdown(followUp));
   sections.push("## 推荐下一步");
-  sections.push(nextSteps === "" ? "(无)" : nextSteps);
+  sections.push(nextSteps === "" ? "(无)" : neutralizeMarkdown(nextSteps));
 
   sections.push("## Session 总耗时");
   sections.push(formatDuration(deps.durationMs));
@@ -163,6 +164,13 @@ export function renderRecap(deps: RecapDeps): string {
 function stripLabel(text: string, label: string): string {
   const trimmed = text.trim();
   return trimmed.startsWith(label) ? trimmed.slice(label.length).trim() : trimmed;
+}
+
+/** Render one assessed item with its (untrusted) question and feedback neutralized. */
+function renderAssessedItem(item: AssessedItem): string {
+  const question = neutralizeMarkdown(item.question);
+  const feedback = item.feedback === undefined ? "" : ` — ${neutralizeMarkdown(item.feedback)}`;
+  return `- ${question}${feedback}`;
 }
 
 interface AssessedItem {

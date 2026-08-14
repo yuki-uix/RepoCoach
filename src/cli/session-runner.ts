@@ -14,6 +14,7 @@ import type { AgentDecision, Evidence } from "../domain/index.js";
 import type { AgentLoopEvent } from "../agent/index.js";
 import { Orchestrator, type StepResult } from "../orchestrator/orchestrator.js";
 import type { SessionStore } from "../store/index.js";
+import { neutralizeMarkdown } from "./markdown.js";
 
 /** Reads one line of user input (the readline `question` seam). */
 export type PromptFn = (query: string) => Promise<string>;
@@ -204,7 +205,7 @@ export function renderDecision(decision: AgentDecision | null, terminal: boolean
     out += renderEvidenceBlock(decision.evidence);
   }
   if (!terminal && decision.feedback !== undefined && decision.feedback !== "") {
-    out += `${decision.feedback}\n`;
+    out += `${neutralizeMarkdown(decision.feedback)}\n`;
   }
   return out;
 }
@@ -225,11 +226,11 @@ export function renderEvidenceBlock(evidence: Evidence[]): string {
 
 /** Render a highlighted question with a separator rule above it. */
 export function renderQuestion(question: string): string {
-  return `${dim("─".repeat(QUESTION_RULE_WIDTH))}\n${bold(question)}\n`;
+  return `${dim("─".repeat(QUESTION_RULE_WIDTH))}\n${bold(neutralizeMarkdown(question))}\n`;
 }
 
 export function formatEvidence(evidence: Evidence): string {
-  return `${evidence.path}:${evidence.startLine}-${evidence.endLine} — ${evidence.reason}`;
+  return `${evidence.path}:${evidence.startLine}-${evidence.endLine} — ${neutralizeMarkdown(evidence.reason)}`;
 }
 
 /** `repo_search(pattern=...)` — primitive args rendered as `key=value`. */

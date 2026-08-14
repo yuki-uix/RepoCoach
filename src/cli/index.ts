@@ -46,6 +46,7 @@ export {
   renderRecap,
   splitFeedback,
 } from "./recap.js";
+export { codeBlock, escapeFences, escapeHeadings, neutralizeMarkdown } from "./markdown.js";
 
 export type CliDeps = AssembleDeps;
 

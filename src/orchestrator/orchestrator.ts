@@ -70,15 +70,18 @@ export interface OrchestratorOptions {
 
 const DEFAULT_MAX_TURNS = 5;
 /**
- * Default per-session token budget. The values are measured from real-model
- * smoke runs (issue #23): one full 4-question session used ~122k input / ~21k
- * output tokens (it converged early after hitting the old 20k output cap), and
- * the full 5-question run projects to ~150k / ~26k; these limits leave headroom
- * above both.
+ * Default per-session token budget. The values are measured from two complete
+ * real-model smoke runs: a skip-heavy session used 121,972 input / 20,997 output
+ * tokens (4 questions), and a session that gave 5 substantive answers used
+ * 199,241 input / 43,817 output (4 questions, hitting the old 40k output cap and
+ * forced to converge early). The latter projects to ~50k input / ~11k output per
+ * question, so a full 5-question run needs ~250k input / ~55k output; these
+ * limits leave headroom above that. Cost grows linearly with turns because of
+ * cross-turn re-reads (issue #25).
  */
 export const DEFAULT_BUDGET: TokenBudget = {
-  maxInputTokens: 250_000,
-  maxOutputTokens: 40_000,
+  maxInputTokens: 320_000,
+  maxOutputTokens: 70_000,
 };
 const MAX_DECISION_RETRIES = 2;
 
