@@ -76,7 +76,16 @@ export type AgentLoopEvent =
   | { type: "tool_call_started"; name: string; arguments: string }
   | { type: "tool_result"; name: string; result: string }
   | { type: "text_delta"; delta: string }
-  | { type: "decision_submitted"; decision: AgentDecision };
+  | { type: "decision_submitted"; decision: AgentDecision }
+  | {
+      type: "read_file_content";
+      path: string;
+      startLine: number;
+      endLine: number;
+      /** 0-based turn index the read happened in. */
+      turnIndex: number;
+    }
+  | { type: "carried_context"; bytes: number; turnIndex: number };
 
 export interface AgentLoopOptions {
   provider: ChatProvider;
@@ -95,6 +104,13 @@ export interface AgentLoopOptions {
    * it empty, so its first turn re-reads (see read-cache.ts).
    */
   readCache?: SessionReadCache;
+  /**
+   * Whether to carry already-read ranges into later turns' context (issue #25).
+   * Defaults to true; `false` reproduces the pre-optimisation behaviour exactly
+   * (no carried block, no `recordCarried`) so the same instrumentation can
+   * measure both arms of the A/B comparison.
+   */
+  carryReadContext?: boolean;
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -161,21 +177,33 @@ export class AgentLoop {
   private readonly evidenceValidator?: EvidenceValidator;
   private readonly ledger?: ToolReturnLedger;
   private readonly readCache: SessionReadCache;
+  private readonly carryReadContext: boolean;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
+  /** 0-based turn index of the invoke currently running (set at invoke start). */
+  private currentTurnIndex = 0;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
     this.evidenceValidator = options.evidenceValidator;
     this.ledger = options.ledger;
     this.readCache = options.readCache ?? new SessionReadCache();
+    this.carryReadContext = options.carryReadContext ?? true;
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
       evidenceValidator: options.evidenceValidator,
       returnRecorder: options.ledger,
       readCache: this.readCache,
+      onContentRead: (path, startLine, endLine) =>
+        this.emit({
+          type: "read_file_content",
+          path,
+          startLine,
+          endLine,
+          turnIndex: this.currentTurnIndex,
+        }),
     });
     this.model = options.model ?? DEFAULT_DEEPSEEK_MODEL;
     this.maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
@@ -189,6 +217,7 @@ export class AgentLoop {
   async invoke(input: AgentInvokerInput): Promise<AgentInvocation> {
     // A new turn starts: clear last turn's tool returns and advance the
     // validator's turn association (turnIndex = number of completed turns).
+    this.currentTurnIndex = input.turnHistory.length;
     this.ledger?.resetTurn();
     this.evidenceValidator?.setTurnIndex?.(input.turnHistory.length);
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
@@ -350,7 +379,10 @@ export class AgentLoop {
    * Returns null on the first turn or when the cache is empty.
    */
   private buildCarriedContextBlock(turnIndex: number): string | null {
-    if (turnIndex === 0 || this.readCache.ranges.length === 0) {
+    // The carry can be switched off (eval --no-carry) to reproduce the exact
+    // pre-#25 behaviour: no carried block is injected and nothing is recorded
+    // as carried, so the same instrumentation measures both arms of the A/B.
+    if (!this.carryReadContext || turnIndex === 0 || this.readCache.ranges.length === 0) {
       return null;
     }
     const { carry, omitted } = selectCarryRanges(
@@ -362,7 +394,9 @@ export class AgentLoop {
     for (const range of carry) {
       this.ledger?.recordCarried(range.path, range.startLine, range.endLine);
     }
-    return formatCarriedBlock(carry, omitted);
+    const block = formatCarriedBlock(carry, omitted);
+    this.emit({ type: "carried_context", bytes: byteLength(block), turnIndex });
+    return block;
   }
 
   private async callProvider(

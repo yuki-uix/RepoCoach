@@ -91,14 +91,14 @@ export function renderReport(report: EvalReport): string {
   lines.push(`ended:      ${renderInline(report.endedPhase)}${report.degraded ? " (degraded)" : ""}`);
   lines.push("");
 
-  appendLiveSession(lines, metrics);
+  appendLiveSession(lines, report.run, metrics);
   lines.push("");
   appendJudgeMode(lines, report.judge);
 
   return `${lines.join("\n")}\n`;
 }
 
-function appendLiveSession(lines: string[], metrics: ReportMetrics): void {
+function appendLiveSession(lines: string[], run: EvalRun, metrics: ReportMetrics): void {
   lines.push("Live session (evidence-grounded questioning)");
   lines.push("-".repeat(58));
   lines.push(
@@ -121,6 +121,7 @@ function appendLiveSession(lines: string[], metrics: ReportMetrics): void {
   lines.push(
     `Cost                 ${metrics.cost.inputTokens} in / ${metrics.cost.outputTokens} out tokens, ${metrics.cost.wallClockMs}ms`,
   );
+  appendInstrumentation(lines, run);
 
   if (precision.failures.length > 0) {
     lines.push("");
@@ -149,6 +150,35 @@ function appendLiveSession(lines: string[], metrics: ReportMetrics): void {
       lines.push(`  - ${renderInline(name)}`);
     }
   }
+}
+
+/**
+ * The three instrumented counts (tool calls, repeated reads, carried bytes).
+ * They are counts, not ratios, so there is no "not evaluable" state — an empty
+ * run just shows 0 and is marked invalid rather than faking a number.
+ */
+function appendInstrumentation(lines: string[], run: EvalRun): void {
+  const invalid = run.turns.length === 0;
+  const suffix = invalid ? " (run invalid)" : "";
+
+  const totalCalls = Object.values(run.toolCalls).reduce((sum, count) => sum + count, 0);
+  const callList = Object.entries(run.toolCalls)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, count]) => `${name}: ${count}`)
+    .join(", ");
+  lines.push(
+    `Tool calls           ${totalCalls === 0 ? "0" : `${callList} (${totalCalls} total)`}${suffix}`,
+  );
+  lines.push(`Repeated reads       ${run.repeatedReads}${suffix}`);
+
+  const carried = run.carriedBytes.reduce((sum, bytes) => sum + bytes, 0);
+  let carriedDetail = String(carried);
+  if (!invalid && run.carriedBytes.length > 0) {
+    carriedDetail = `${carried} across ${run.carriedBytes.length} turn(s): ${run.carriedBytes.join(", ")}`;
+  } else if (!invalid) {
+    carriedDetail = `${carried} (no carry)`;
+  }
+  lines.push(`Carried bytes        ${carriedDetail}${suffix}`);
 }
 
 function appendJudgeMode(lines: string[], judge: JudgeResult): void {
@@ -240,4 +270,58 @@ function appendAdaptation(lines: string[], adaptation: AdaptationResult): void {
     return;
   }
   lines.push(`Adaptation           not evaluable (${adaptation.reason ?? "no follow-up question"})`);
+}
+
+/**
+ * Side-by-side comparison of the "carry off" vs "carry on" arms of the #25
+ * optimisation. Only the quantities that matter for the comparison are shown;
+ * the note below the table makes clear that token counts are high-variance and
+ * repeatedReads is the primary signal.
+ */
+export function renderAbComparison(off: EvalReport, on: EvalReport): string {
+  const offRun = off.run;
+  const onRun = on.run;
+  const offCalls = Object.values(offRun.toolCalls).reduce((sum, n) => sum + n, 0);
+  const onCalls = Object.values(onRun.toolCalls).reduce((sum, n) => sum + n, 0);
+  const offCarried = offRun.carriedBytes.reduce((sum, b) => sum + b, 0);
+  const onCarried = onRun.carriedBytes.reduce((sum, b) => sum + b, 0);
+
+  const header = ["metric", "carry OFF", "carry ON"];
+  const rows: string[][] = [
+    ["repeatedReads", String(offRun.repeatedReads), String(onRun.repeatedReads)],
+    ["toolCalls (total)", String(offCalls), String(onCalls)],
+    ["input tokens", String(offRun.usage.inputTokens), String(onRun.usage.inputTokens)],
+    ["wall clock (ms)", String(offRun.wallClockMs), String(onRun.wallClockMs)],
+    ["carried bytes", String(offCarried), String(onCarried)],
+  ];
+  const widths = [0, 1, 2].map((i) =>
+    Math.max(header[i]!.length, ...rows.map((row) => row[i]!.length)),
+  );
+  const pad = (cell: string, i: number): string => cell.padEnd(widths[i]!);
+
+  const lines: string[] = [];
+  lines.push("RepoCoach Eval A/B (carry off vs carry on)");
+  lines.push("=".repeat(58));
+  lines.push(`${pad(header[0]!, 0)}  ${pad(header[1]!, 1)}  ${pad(header[2]!, 2)}`.trimEnd());
+  lines.push("-".repeat(58));
+  for (const row of rows) {
+    lines.push(`${pad(row[0]!, 0)}  ${pad(row[1]!, 1)}  ${pad(row[2]!, 2)}`.trimEnd());
+  }
+  lines.push("");
+  lines.push(
+    "Note: real-model input/output token totals vary widely between runs",
+  );
+  lines.push(
+    "(measured 137k-212k, ~35%), so the token row is NOT a reliable",
+  );
+  lines.push(
+    "before/after signal. repeatedReads is the primary metric here — it",
+  );
+  lines.push(
+    "counts content-returning re-reads of the same (path, range) across turns,",
+  );
+  lines.push(
+    "the exact waste this optimisation removes.",
+  );
+  return `${lines.join("\n")}\n`;
 }

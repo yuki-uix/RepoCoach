@@ -10,9 +10,11 @@
  */
 
 import { performance } from "node:perf_hooks";
+import type { AgentLoopEvent } from "../agent/index.js";
 import type { SessionAssembly } from "../cli/assemble.js";
 import { lastFeedback, renderRecap } from "../cli/recap.js";
 import type { Repository } from "../reader/index.js";
+import { repeatedReadCount, type ReadOccurrence } from "./metrics.js";
 import type { EvalEndPhase, EvalRun, EvalTurn } from "./types.js";
 
 export interface RunSessionOptions {
@@ -23,12 +25,49 @@ export interface RunSessionOptions {
   featureGoal: string;
   /** Scripted learner answers, consumed in order; running out skips the rest. */
   answers: string[];
+  /** Cross-turn read-cache carry (default true); false = pre-#25 behaviour. */
+  carry?: boolean;
 }
 
 export async function runEvalSession(options: RunSessionOptions): Promise<EvalRun> {
-  const { asm, repo, repositoryPath, featureId, featureGoal, answers } = options;
+  const { asm, repo, repositoryPath, featureId, featureGoal, answers, carry } = options;
+  const carryReadContext = carry ?? true;
   const session = asm.store.createSession({ repositoryId: repositoryPath, featureId });
-  const { orchestrator } = asm.buildOrchestrator(repo, session.id, featureGoal);
+
+  // Instrument the loop via its event stream: tool-call counts, content-returning
+  // reads (for the repeated-reads metric) and per-turn carried bytes. These are
+  // counts the harness records while the loop runs; they never alter behaviour.
+  const toolCalls = new Map<string, number>();
+  const reads: ReadOccurrence[] = [];
+  const carriedBytes: number[] = [];
+  const onEvent = (event: AgentLoopEvent): void => {
+    switch (event.type) {
+      case "tool_call_started":
+        toolCalls.set(event.name, (toolCalls.get(event.name) ?? 0) + 1);
+        break;
+      case "read_file_content":
+        reads.push({
+          path: event.path,
+          startLine: event.startLine,
+          endLine: event.endLine,
+          turnIndex: event.turnIndex,
+        });
+        break;
+      case "carried_context":
+        carriedBytes.push(event.bytes);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const { orchestrator } = asm.buildOrchestrator(
+    repo,
+    session.id,
+    featureGoal,
+    onEvent,
+    { carryReadContext },
+  );
 
   const turns: EvalTurn[] = [];
   const startedAt = performance.now();
@@ -96,5 +135,8 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
     wallClockMs,
     degraded,
     endedPhase,
+    toolCalls: Object.fromEntries(toolCalls),
+    repeatedReads: repeatedReadCount(reads),
+    carriedBytes,
   };
 }

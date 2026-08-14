@@ -69,6 +69,12 @@ export interface ToolRuntime {
   returnRecorder?: ReturnRecorder;
   /** Session-level record of shown file ranges, carried across turns (issue #25). */
   readCache?: SessionReadCache;
+  /**
+   * Measurement hook: called with the shown (path, line range) whenever
+   * repo_read_file actually returns content (never for the already-carried /
+   * already-read shortcuts). The loop uses it to emit `read_file_content`.
+   */
+  onContentRead?: (path: string, startLine: number, endLine: number) => void;
 }
 
 export interface ToolExecution {
@@ -446,6 +452,7 @@ function readFile(
     const endLine = slice.startLine + fit.keptLines - 1;
     runtime.returnRecorder?.record(args.path, slice.startLine, endLine);
     runtime.readCache?.record(args.path, slice.startLine, endLine, numbered);
+    runtime.onContentRead?.(args.path, slice.startLine, endLine);
   }
   if (!fit.truncated) {
     return `${header}\n${numbered}`;

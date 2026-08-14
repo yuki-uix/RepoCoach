@@ -82,6 +82,15 @@ export interface BuiltOrchestrator {
   loop: AgentLoop;
 }
 
+/** Per-session build options (beyond the injected dependencies). */
+export interface BuildOrchestratorOptions {
+  /**
+   * Whether the AgentLoop carries already-read ranges across turns (issue #25).
+   * Defaults to true; `false` reproduces pre-optimisation behaviour for A/B.
+   */
+  carryReadContext?: boolean;
+}
+
 export interface SessionAssembly {
   reader: Reader;
   provider: ChatProvider;
@@ -101,6 +110,7 @@ export interface SessionAssembly {
     sessionId: string,
     featureGoal: string,
     onEvent?: (event: AgentLoopEvent) => void,
+    opts?: BuildOrchestratorOptions,
   ): BuiltOrchestrator;
 }
 
@@ -136,7 +146,7 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
     stdin: deps.stdin ?? process.stdin,
     stdout: deps.stdout ?? process.stdout,
     stderr: deps.stderr ?? process.stderr,
-    buildOrchestrator(repo, sessionId, featureGoal, onEvent) {
+    buildOrchestrator(repo, sessionId, featureGoal, onEvent, opts) {
       const ledger = new ToolReturnLedger();
       const validator = new GroundingEvidenceValidator({
         ledger,
@@ -150,6 +160,7 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
         model: DEFAULT_DEEPSEEK_MODEL,
         evidenceValidator: validator,
         ledger,
+        carryReadContext: opts?.carryReadContext,
         onEvent,
       });
       // A resumed session carries its cumulative token usage; pass it through so

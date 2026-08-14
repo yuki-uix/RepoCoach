@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildReport,
+  renderAbComparison,
   renderReport,
   serializeReport,
   type ReportMetrics,
@@ -265,6 +266,62 @@ describe("report rendering (terminal gate)", () => {
 
     expect(out).toContain("Adaptation           not evaluable (no follow-up question after the correct answer)");
     expect(out).not.toContain("adapted");
+  });
+
+  it("marks an empty run's instrumented counts as invalid instead of fabricating numbers", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun({ turns: [] }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+
+    const out = renderReport(report);
+
+    // Counts are not ratios: an empty run shows 0 and is flagged invalid.
+    expect(out).toMatch(/Tool calls\s+0 \(run invalid\)/);
+    expect(out).toMatch(/Repeated reads\s+0 \(run invalid\)/);
+    expect(out).toMatch(/Carried bytes\s+0 \(run invalid\)/);
+  });
+
+  it("renders the A/B comparison table and calls out the high-variance token row", () => {
+    const off = buildReport({
+      mode: "real",
+      run: makeEvalRun({
+        repeatedReads: 5,
+        toolCalls: { repo_read_file: 8, submit_decision: 7 },
+        usage: { inputTokens: 180_000, outputTokens: 30 },
+        wallClockMs: 1000,
+        carriedBytes: [],
+      }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const on = buildReport({
+      mode: "real",
+      run: makeEvalRun({
+        repeatedReads: 1,
+        toolCalls: { repo_read_file: 5, submit_decision: 7 },
+        usage: { inputTokens: 150_000, outputTokens: 30 },
+        wallClockMs: 900,
+        carriedBytes: [2000, 2000],
+      }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+
+    const out = renderAbComparison(off, on);
+
+    expect(out).toContain("RepoCoach Eval A/B");
+    expect(out).toContain("carry OFF");
+    expect(out).toContain("carry ON");
+    expect(out).toMatch(/repeatedReads\s+5\s+1/);
+    expect(out).toMatch(/toolCalls \(total\)\s+15\s+12/);
+    expect(out).toMatch(/input tokens\s+180000\s+150000/);
+    expect(out).toMatch(/wall clock \(ms\)\s+1000\s+900/);
+    expect(out).toMatch(/carried bytes\s+0\s+4000/);
+    expect(out).toContain("137k-212k");
+    expect(out).toContain("repeatedReads is the primary metric");
   });
 
   it("renders an empty denominator as not evaluable, never 0.0%", () => {

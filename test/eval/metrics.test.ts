@@ -9,8 +9,10 @@ import {
   orderedPaths,
   pathAccuracy,
   questionJaccard,
+  repeatedReadCount,
   sessionCost,
 } from "../../src/eval/metrics.js";
+import type { ReadOccurrence } from "../../src/eval/metrics.js";
 import type { CallChainStep } from "../../src/eval/fixtures.js";
 import { makeEvalRun, makeTempRepo, makeTurn } from "./helpers";
 
@@ -378,5 +380,63 @@ describe("sessionCost", () => {
     const run = makeEvalRun({ usage: { inputTokens: 12, outputTokens: 7 }, wallClockMs: 34 });
 
     expect(sessionCost(run)).toEqual({ inputTokens: 12, outputTokens: 7, wallClockMs: 34 });
+  });
+});
+
+describe("repeatedReadCount", () => {
+  const read = (path: string, startLine: number, endLine: number, turnIndex: number): ReadOccurrence => ({
+    path,
+    startLine,
+    endLine,
+    turnIndex,
+  });
+
+  it("is 0 when every read is a distinct range", () => {
+    const reads = [
+      read("src/a.ts", 1, 3, 0),
+      read("src/b.ts", 1, 3, 0),
+      read("src/a.ts", 4, 6, 1),
+    ];
+
+    expect(repeatedReadCount(reads)).toBe(0);
+  });
+
+  it("counts each cross-turn re-read of the same range", () => {
+    // src/a.ts:1-3 read in turns 0, 1 and 3 → 2 repeats; src/b.ts:1-2 read in
+    // turns 0 and 2 → 1 repeat.
+    const reads = [
+      read("src/a.ts", 1, 3, 0),
+      read("src/b.ts", 1, 2, 0),
+      read("src/a.ts", 1, 3, 1),
+      read("src/b.ts", 1, 2, 2),
+      read("src/a.ts", 1, 3, 3),
+    ];
+
+    expect(repeatedReadCount(reads)).toBe(3);
+  });
+
+  it("ignores same-turn repeats — only distinct turns count", () => {
+    // The same range read twice in turn 0 (a same-turn re-read) plus once in
+    // turn 1 → exactly one cross-turn repeat.
+    const reads = [
+      read("src/a.ts", 1, 3, 0),
+      read("src/a.ts", 1, 3, 0),
+      read("src/a.ts", 1, 3, 1),
+    ];
+
+    expect(repeatedReadCount(reads)).toBe(1);
+  });
+
+  it("is 0 for an empty read sequence", () => {
+    expect(repeatedReadCount([])).toBe(0);
+  });
+
+  it("normalizes backslash paths to POSIX before keying", () => {
+    const reads = [
+      read("src\\a.ts", 1, 3, 0),
+      read("src/a.ts", 1, 3, 1),
+    ];
+
+    expect(repeatedReadCount(reads)).toBe(1);
   });
 });

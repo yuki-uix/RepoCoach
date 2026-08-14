@@ -86,4 +86,44 @@ describe("eval:mock end to end", () => {
     expect(report.metrics.cost.outputTokens).toBe(8);
     expect(report.metrics.cost.wallClockMs).toBeGreaterThanOrEqual(0);
   });
+
+  it("records tool-call counts and the instrumented read/carry fields", async () => {
+    const streams = capturedStreams();
+
+    const report = await runEval("mock", {
+      repoRoot,
+      repositoryPath: fixtureRoot,
+      stdout: streams.stdout,
+      out: tempOut(),
+    });
+
+    // The mock reads the 5-step call chain once, then submits 7 decisions.
+    expect(report.run.toolCalls).toEqual({ submit_decision: 7, repo_read_file: 5 });
+    expect(report.run.repeatedReads).toBe(0);
+    // Carry is on by default, so later turns carry the trace's reads.
+    expect(report.run.carriedBytes.length).toBeGreaterThan(0);
+    expect(report.run.carriedBytes.reduce((sum, bytes) => sum + bytes, 0)).toBeGreaterThan(0);
+
+    const outText = streams.stdoutText();
+    expect(outText).toContain("Tool calls");
+    expect(outText).toContain("Repeated reads");
+    expect(outText).toContain("Carried bytes");
+  });
+
+  it("--no-carry reproduces pre-optimisation behaviour: no carried context", async () => {
+    const streams = capturedStreams();
+
+    const report = await runEval("mock", {
+      repoRoot,
+      repositoryPath: fixtureRoot,
+      stdout: streams.stdout,
+      out: tempOut(),
+      carry: false,
+    });
+
+    // Same reads and decisions, but nothing is carried into later turns.
+    expect(report.run.toolCalls).toEqual({ submit_decision: 7, repo_read_file: 5 });
+    expect(report.run.repeatedReads).toBe(0);
+    expect(report.run.carriedBytes).toEqual([]);
+  });
 });

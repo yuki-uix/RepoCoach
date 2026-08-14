@@ -502,7 +502,11 @@ describe("AgentLoop cross-turn read cache", () => {
     assessment: "correct",
   };
 
-  function groundingLoop(provider: ChatProvider, readCache: SessionReadCache): {
+  function groundingLoop(
+    provider: ChatProvider,
+    readCache: SessionReadCache,
+    opts: Partial<AgentLoopOptions> = {},
+  ): {
     loop: AgentLoop;
     store: InMemoryEvidenceStore;
   } {
@@ -521,6 +525,7 @@ describe("AgentLoop cross-turn read cache", () => {
       evidenceValidator: validator,
       ledger,
       readCache,
+      ...opts,
     });
     return { loop, store };
   }
@@ -601,6 +606,39 @@ describe("AgentLoop cross-turn read cache", () => {
       (m) => (m.content ?? "").includes("kind=already_read"),
     );
     expect(carriedMessage).toBe(false);
+  });
+
+  it("disables the carried block and grounding when carryReadContext is false", async () => {
+    const readCache = new SessionReadCache();
+    readCache.record("src/index.ts", 1, 3, "1 | export function add");
+    const cited = {
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 3,
+      reason: "entry",
+    };
+
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage(
+        "t",
+        "submit_decision",
+        JSON.stringify({ evidence: [cited], assessment: "correct", nextAction: "show_evidence" }),
+      ),
+    );
+    const { loop, store } = groundingLoop(provider, readCache, { carryReadContext: false });
+
+    // A later turn (turn history present) would normally carry the range; with
+    // the switch off it neither injects the block nor records it as carried, so
+    // the citation is rejected like any fabricated claim.
+    await expect(
+      loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [priorTurn] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    const carried = requests[0].messages.some(
+      (m) => (m.content ?? "").includes("kind=already_read"),
+    );
+    expect(carried).toBe(false);
+    expect(store.listBySession("s1")).toEqual([]);
   });
 
   it("defaults to a fresh cache and carries a turn-1 read into turn 2", async () => {

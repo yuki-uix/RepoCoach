@@ -318,6 +318,47 @@ export async function hallucination(
 }
 
 // ---------------------------------------------------------------------------
+// Repeated reads (cross-turn tool-call instrumentation)
+// ---------------------------------------------------------------------------
+
+/** One content-returning read of a file range, tagged with its turn. */
+export interface ReadOccurrence {
+  path: string;
+  startLine: number;
+  endLine: number;
+  /** 0-based turn index (the loop's `turnHistory.length` at read time). */
+  turnIndex: number;
+}
+
+/**
+ * Count cross-turn repeated reads: for each (path, line range), the number of
+ * distinct turns in which repo_read_file returned it with content, minus one for
+ * its first read. Same-turn repeats are excluded by counting distinct turns per
+ * range, so a range read twice within one turn (already suppressed by the
+ * same-turn dedup) never counts as a cross-turn repeat.
+ *
+ * This is a count, not a ratio — it is always evaluable and is 0 for a session
+ * that never re-reads a range (and for an empty session).
+ */
+export function repeatedReadCount(reads: readonly ReadOccurrence[]): number {
+  const turnsByRange = new Map<string, Set<number>>();
+  for (const read of reads) {
+    const key = `${normalizePath(read.path)}#${read.startLine}-${read.endLine}`;
+    let turns = turnsByRange.get(key);
+    if (turns === undefined) {
+      turns = new Set();
+      turnsByRange.set(key, turns);
+    }
+    turns.add(read.turnIndex);
+  }
+  let repeated = 0;
+  for (const turns of turnsByRange.values()) {
+    repeated += Math.max(0, turns.size - 1);
+  }
+  return repeated;
+}
+
+// ---------------------------------------------------------------------------
 // Cost
 // ---------------------------------------------------------------------------
 
@@ -416,6 +457,11 @@ function tokenize(text: string): string[] {
 /** Whole-word membership: `\b` boundaries so `add` does not match `added`. */
 function wordIn(symbol: string, text: string): boolean {
   return new RegExp(`\\b${escapeRegExp(symbol)}\\b`).test(text);
+}
+
+/** Repo paths are compared as POSIX, regardless of host separator. */
+function normalizePath(path: string): string {
+  return path.split("\\").join("/");
 }
 
 const REGEX_SPECIALS = new Set([

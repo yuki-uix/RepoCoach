@@ -12,7 +12,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Writable } from "node:stream";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { ChatProvider } from "../agent/provider.js";
 import { DEFAULT_DEEPSEEK_MODEL, DeepSeekProvider } from "../agent/index.js";
@@ -34,6 +34,7 @@ import {
 } from "./metrics.js";
 import {
   buildReport,
+  renderAbComparison,
   renderReport,
   writeReport,
   type EvalMode,
@@ -50,6 +51,8 @@ export interface EvalCliOptions {
   dataDir?: string;
   cacheRoot?: string;
   stdout?: Writable;
+  /** Cross-turn read-cache carry (default true); false = pre-#25 behaviour. */
+  carry?: boolean;
 }
 
 export async function runEval(
@@ -96,6 +99,7 @@ export async function runEval(
       featureId,
       featureGoal,
       answers: [prediction.userAnswer, followUp.userAnswer],
+      carry: options.carry,
     });
     const correctRun = await runEvalSession({
       asm,
@@ -104,6 +108,7 @@ export async function runEval(
       featureId,
       featureGoal,
       answers: [prediction.userAnswer],
+      carry: options.carry,
     });
     const incorrectRun = await runEvalSession({
       asm,
@@ -112,6 +117,7 @@ export async function runEval(
       featureId,
       featureGoal,
       answers: [INCORRECT_PREDICTION_ANSWER],
+      carry: options.carry,
     });
 
     const knownSymbols = callChain.map((step) => step.symbol);
@@ -156,6 +162,40 @@ export async function runEval(
 function buildRealProvider(repoRoot: string): ChatProvider {
   const config = loadConfig(join(repoRoot, ".env.local"));
   return new DeepSeekProvider({ apiKey: config.deepseekKey, model: DEFAULT_DEEPSEEK_MODEL });
+}
+
+/**
+ * A/B comparison for issue #25: run the "carry off" arm (pre-optimisation
+ * behaviour) then the "carry on" arm, sequentially in one process so the two
+ * arms never race the provider. Each arm's JSON report is written separately;
+ * only the side-by-side comparison table goes to stdout.
+ */
+export async function runAbEval(options: EvalCliOptions = {}): Promise<void> {
+  const stdout = options.stdout ?? process.stdout;
+  const base = options.out ?? join(defaultRepoRoot(), "eval-report.json");
+  const off = await runEval("real", {
+    ...options,
+    carry: false,
+    out: abOutPath(base, "off"),
+    stdout: discardStream(),
+  });
+  const on = await runEval("real", {
+    ...options,
+    carry: true,
+    out: abOutPath(base, "on"),
+    stdout: discardStream(),
+  });
+  stdout.write(renderAbComparison(off, on));
+}
+
+/** `eval-report.json` → `eval-report.<arm>.json`. */
+function abOutPath(base: string, arm: "off" | "on"): string {
+  return base.replace(/\.json$/, `.${arm}.json`);
+}
+
+/** A Writable that discards everything — suppresses the per-arm human reports. */
+function discardStream(): Writable {
+  return new Writable({ write(_chunk, _encoding, callback) { callback(); } });
 }
 
 function defaultRepoRoot(): string {
