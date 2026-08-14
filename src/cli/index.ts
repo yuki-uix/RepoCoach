@@ -20,7 +20,7 @@ import {
 } from "../import/index.js";
 import { assembleSession, type AssembleDeps, type SessionAssembly } from "./assemble.js";
 import { lastFeedback, renderRecap, formatDuration } from "./recap.js";
-import { SessionRunner, type EventTarget, type PromptFn } from "./session-runner.js";
+import { SessionRunner, type EventTarget, type PromptFn, type RunOutcome } from "./session-runner.js";
 import type { CandidateScope } from "./candidates.js";
 
 export { assembleSession, DEFAULT_DATA_DIR } from "./assemble.js";
@@ -30,7 +30,13 @@ export {
   GeneratedCandidateProvider,
 } from "./candidates.js";
 export type { CandidateProvider, CandidateScope } from "./candidates.js";
-export { SessionRunner } from "./session-runner.js";
+export {
+  SessionRunner,
+  formatEvidence,
+  renderDecision,
+  renderEvidenceBlock,
+  renderQuestion,
+} from "./session-runner.js";
 export type { RunOutcome, RunOutcomePhase } from "./session-runner.js";
 export {
   collectEvidence,
@@ -218,7 +224,7 @@ async function finishSession(
   asm: SessionAssembly,
   repo: Repository,
   sessionId: string,
-  outcome: { phase: "recap" | "error" | "abandoned" },
+  outcome: RunOutcome,
   prompt: PromptFn,
 ): Promise<number> {
   if (outcome.phase === "abandoned") {
@@ -228,7 +234,9 @@ async function finishSession(
     return 0;
   }
   if (outcome.phase === "error") {
-    asm.stderr.write(`Session ${sessionId} 进入 error 状态，无法完成复盘。\n`);
+    asm.stderr.write(
+      `Session ${sessionId} 进入 error 状态，无法完成复盘。可用 repocoach resume ${sessionId} 恢复。\n`,
+    );
     return 1;
   }
 
@@ -242,6 +250,11 @@ async function finishSession(
     finalFeedback: lastFeedback(turns),
     durationMs: asm.store.sessionDuration(sessionId),
   });
+  if (outcome.degraded) {
+    asm.stderr.write(
+      `⚠ 模型未能产出有效决策，已用已保存证据合成一份最小复盘。\n`,
+    );
+  }
   asm.stdout.write(`${recap}\n`);
 
   const selfAssessment = await prompt("你现在能向别人复述这条链路吗？(y/n) ");

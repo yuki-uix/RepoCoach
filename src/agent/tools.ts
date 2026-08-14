@@ -13,6 +13,12 @@ import { z } from "zod";
 import { evidenceSchema, type Evidence } from "../domain/index.js";
 import type { Repository, Reader } from "../reader/index.js";
 import { formatZodError } from "./errors.js";
+import {
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
+  fitSourceLines,
+  truncateBytes,
+} from "./limits.js";
 import type { ToolDefinition } from "./provider.js";
 
 export interface EvidenceValidator {
@@ -35,6 +41,8 @@ export const acceptAllEvidence: EvidenceValidator = {
  */
 export interface ReturnRecorder {
   record(path: string, startLine: number, endLine: number): void;
+  /** True when this exact (path, inclusive line range) was already returned this turn. */
+  hasRead?(path: string, startLine: number, endLine: number): boolean;
 }
 
 export interface ToolRuntime {
@@ -184,7 +192,12 @@ function executeTool(
       if (entries.length === 0) {
         return "(no readable files)";
       }
-      return entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
+      const listing = entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
+      const capped = truncateBytes(listing, MAX_TOOL_RESULT_BYTES);
+      if (!capped.truncated) {
+        return capped.text;
+      }
+      return `${capped.text}\n(结果已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用 repo_search 定位具体文件)`;
     }
 
     case "repo_search": {
@@ -239,7 +252,16 @@ async function search(
   if (matches.length === 0) {
     return "No matches found.";
   }
+  // Build the result within the byte budget, recording only the matches that
+  // are actually shown so grounding never covers a match the model did not see.
+  let result = "";
   for (const match of matches) {
+    const formatted = formatSearchMatch(match);
+    if (result !== "" && byteLength(result) + byteLength(formatted) + 2 > MAX_TOOL_RESULT_BYTES) {
+      result += "\n\n(结果已截断：更多匹配未显示，可用更窄的 pattern 或更小的 contextLines 重搜)";
+      return result;
+    }
+    result += (result === "" ? "" : "\n\n") + formatted;
     // Record the range actually returned: the match line plus whatever context
     // lines ripgrep really produced (fewer at file boundaries).
     runtime.returnRecorder?.record(
@@ -248,7 +270,7 @@ async function search(
       match.line + match.contextAfter.length,
     );
   }
-  return matches.map(formatSearchMatch).join("\n\n");
+  return result;
 }
 
 function formatSearchMatch(match: {
@@ -279,13 +301,26 @@ function readFile(
     args.startLine,
     args.endLine,
   );
-  // Record the slice actually returned (clamped), not the requested range.
-  runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
+  // Same-turn re-read of the exact range: point at the earlier result instead
+  // of re-sending the full text (issue #23, token waste).
+  if (runtime.returnRecorder?.hasRead?.(args.path, slice.startLine, slice.endLine)) {
+    return `${args.path} (lines ${slice.startLine}-${slice.endLine}) 本轮已读，见上文。`;
+  }
   const header = `${args.path} (lines ${slice.startLine}-${slice.endLine} of ${slice.totalLines})`;
   if (slice.content === "") {
+    // Record the empty slice so a claim for this range is never grounded.
+    runtime.returnRecorder?.record(args.path, slice.startLine, slice.endLine);
     return `${header}\n(empty)`;
   }
-  return `${header}\n${numberLines(slice.content, slice.startLine)}`;
+  // Trim to whole lines within the byte budget, and record only the lines
+  // actually shown — the model must not be able to cite a truncated tail.
+  const fit = fitSourceLines(slice.content, MAX_TOOL_RESULT_BYTES);
+  runtime.returnRecorder?.record(args.path, slice.startLine, slice.startLine + fit.keptLines - 1);
+  const numbered = numberLines(fit.content, slice.startLine);
+  if (!fit.truncated) {
+    return `${header}\n${numbered}`;
+  }
+  return `${header}\n${numbered}\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用更小的行号范围重读剩余部分)`;
 }
 
 function numberLines(content: string, startLine: number): string {

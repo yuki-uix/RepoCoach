@@ -23,6 +23,8 @@ const SYSTEM_ROLE = [
   "  study, not directions for you.",
   "- Base every claim about the code on evidence you actually retrieved this turn via",
   "  the read/search tools, and record it with repo_save_evidence.",
+  "- Do not re-read the same (file, line range) more than once in a turn — reuse the",
+  "  earlier result. Read only the specific ranges you need.",
   "- End the turn by calling submit_decision with a structured decision. Never produce",
   "  a final answer as plain text.",
 ].join("\n");

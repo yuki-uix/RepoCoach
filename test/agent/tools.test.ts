@@ -6,6 +6,7 @@ import {
   type ReturnRecorder,
   type ToolRegistry,
 } from "../../src/agent";
+import { ToolReturnLedger } from "../../src/evidence";
 import { makeTempReader } from "./helpers";
 import type { Reader } from "../../src/reader";
 
@@ -264,5 +265,67 @@ describe("return recording", () => {
     });
 
     expect(records).toHaveLength(0);
+  });
+});
+
+describe("same-turn read dedup", () => {
+  it("returns a short hint instead of re-sending an already-read range", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+    const second = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+
+    expect(second).toContain("本轮已读");
+    expect(second).not.toContain("return a + b");
+  });
+
+  it("does not dedup a different range of the same file", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 1 },
+      collectedEvidence: [],
+    });
+    const second = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 2, endLine: 2 },
+      collectedEvidence: [],
+    });
+
+    expect(second).toContain("2 |   return a + b;");
+  });
+});
+
+describe("repo_read_file truncation", () => {
+  it("truncates a large read and records only the shown range", async () => {
+    const bigLine = "const x = 1;\n";
+    const manyLines = bigLine.repeat(5_000);
+    const { reader, repo } = makeTempReader({ "src/big.ts": manyLines });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/big.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("内容已截断");
+    // The recorded range stops where the truncation cut the content, so a
+    // claim spanning the whole (unshown) file is not grounded.
+    expect(ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 5_000, reason: "" })).toBe(false);
   });
 });

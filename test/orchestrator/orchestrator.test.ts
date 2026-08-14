@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AgentDecisionInvalidError } from "../../src/agent";
 import type {
   AgentDecision,
   Evidence,
@@ -12,7 +13,6 @@ import {
   type AgentInvocation,
   type AgentInvoker,
   type AgentInvokerInput,
-  type StepResult,
 } from "../../src/orchestrator/orchestrator";
 import {
   InMemorySessionStore,
@@ -224,7 +224,7 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
         case "questioning":
           return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
         case "feedback":
-          // Always wants to probe deeper.
+          // Always wants to probe deeper with a fresh question.
           return {
             decision: decision({ assessment: "correct", question: "probe deeper?", nextAction: "ask" }),
             usage: USAGE,
@@ -238,21 +238,101 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     });
 
     await orchestrator.step(); // orientation → hypothesis
-    await orchestrator.step(); // ask prediction (turn 1)
+    await orchestrator.step(); // prediction question (turn 1)
     await orchestrator.step("a"); // → trace
     await orchestrator.step(); // trace → questioning
+    await orchestrator.step(); // follow-up (turn 2)
+    await orchestrator.step("a"); // → feedback
 
-    let last: StepResult | undefined;
-    for (let i = 0; i < 4; i++) {
-      await orchestrator.step(); // ask follow-up (turns 2..5)
-      await orchestrator.step("a"); // → feedback
-      last = await orchestrator.step(); // feedback → questioning, or recap at the limit
+    // Each probe-deeper question is posed immediately after the feedback
+    // transition, so each counts toward the limit.
+    for (let i = 0; i < 3; i++) {
+      await orchestrator.step(); // feedback → questioning (turns 3..5)
+      await orchestrator.step("a"); // answer → feedback
     }
+    const last = await orchestrator.step(); // 6th probe-deeper attempt → recap
 
-    expect(last?.phase).toBe("recap");
-    expect(last?.decisionOverridden).toBe(true);
+    expect(last.phase).toBe("recap");
+    expect(last.decisionOverridden).toBe(true);
     expect(store.getSession(sessionId)?.phase).toBe("recap");
     expect(store.getSession(sessionId)?.turnCount).toBe(5);
+  });
+
+  it("counts the feedback probe-deeper question toward the turn limit", async () => {
+    const { agent } = stubAgent((input) => {
+      switch (input.phase) {
+        case "orientation":
+          return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+        case "hypothesis":
+          return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+        case "trace":
+          return {
+            decision: decision({ evidence: [EVIDENCE], nextAction: "show_evidence" }),
+            usage: USAGE,
+          };
+        case "questioning":
+          return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+        case "feedback":
+          return {
+            decision: decision({ assessment: "correct", question: "probe deeper?", nextAction: "ask" }),
+            usage: USAGE,
+          };
+        default:
+          throw new Error(`unexpected phase ${input.phase}`);
+      }
+    });
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
+
+    await orchestrator.step(); // orientation → hypothesis
+    await orchestrator.step(); // prediction (turn 1)
+    await orchestrator.step("a"); // → trace
+    await orchestrator.step(); // → questioning
+    await orchestrator.step(); // follow-up (turn 2)
+    await orchestrator.step("a"); // → feedback
+
+    const probed = await orchestrator.step(); // probe deeper → questioning
+
+    expect(probed.phase).toBe("questioning");
+    expect(probed.decisionOverridden).toBe(false);
+    expect(store.getSession(sessionId)?.turnCount).toBe(3); // prediction + follow-up + probe
+  });
+
+  it("salvages a minimal recap instead of erroring when the agent fails after content exists", async () => {
+    const { agent } = stubAgent((input) => {
+      if (input.phase === "orientation") {
+        return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+      }
+      if (input.phase === "hypothesis") {
+        return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+      }
+      // After a question was asked, the loop throws (no valid decision).
+      throw new AgentDecisionInvalidError("no decision");
+    });
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
+
+    await orchestrator.step(); // orientation → hypothesis
+    await orchestrator.step(); // prediction (turn 1)
+    await orchestrator.step("a"); // answer → trace
+    const result = await orchestrator.step(); // trace: the loop throws → salvage recap
+
+    expect(result.phase).toBe("recap");
+    expect(result.decision).toBeNull();
+    expect(store.getSession(sessionId)?.phase).toBe("recap");
+    expect(store.getSession(sessionId)?.status).toBe("completed");
+  });
+
+  it("abandons with error when the agent fails before any content exists", async () => {
+    const { agent } = stubAgent(() => {
+      throw new AgentDecisionInvalidError("no decision");
+    });
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
+
+    const result = await orchestrator.step(); // orientation, loop throws
+
+    expect(result.phase).toBe("error");
+    expect(result.decision).toBeNull();
+    expect(store.getSession(sessionId)?.phase).toBe("error");
+    expect(store.getSession(sessionId)?.status).toBe("abandoned");
   });
 
   it("lets the rules overrule an illegal nextAction suggestion", async () => {
