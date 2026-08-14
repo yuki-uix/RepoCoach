@@ -34,8 +34,9 @@ describe("CLI terminal-phase hints", () => {
     expect(err).toContain("error 状态");
     // A terminal session cannot be resumed, so the hint must not say so.
     expect(err).not.toContain("resume");
-    // It points at the persisted evidence and a fresh start instead.
-    expect(err).toContain("list");
+    // It points at the persisted evidence (via `show`, which actually renders
+    // it) and a fresh start instead.
+    expect(err).toContain("show");
     expect(err).toContain("start");
   });
 

@@ -3,7 +3,8 @@
  *
  * `repocoach start <url-or-path>` imports a repository, shows feature
  * candidates, runs the Q&A loop and renders the recap. `resume <sessionId>`
- * continues an interrupted session; `list` enumerates persisted sessions.
+ * continues an interrupted session; `list` enumerates persisted sessions;
+ * `show <sessionId>` renders one session's persisted turns and evidence.
  * All interaction uses node:readline/promises over injectable streams (no CLI
  * framework, zero new dependencies). See docs/architecture.md §3.
  */
@@ -21,6 +22,7 @@ import {
 import { assembleSession, type AssembleDeps, type SessionAssembly } from "./assemble.js";
 import { lastFeedback, renderRecap, formatDuration } from "./recap.js";
 import { SessionRunner, type EventTarget, type PromptFn, type RunOutcome } from "./session-runner.js";
+import { renderSessionShow } from "./show.js";
 import type { CandidateScope } from "./candidates.js";
 
 export { assembleSession, DEFAULT_DATA_DIR } from "./assemble.js";
@@ -47,6 +49,8 @@ export {
   splitFeedback,
 } from "./recap.js";
 export { neutralizeMarkdown, renderUntrustedBlock } from "./markdown.js";
+export { renderSessionShow } from "./show.js";
+export type { ShowDeps } from "./show.js";
 
 export type CliDeps = AssembleDeps;
 
@@ -118,6 +122,11 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         return await runResume(arg, resolvedDeps);
       case "list":
         return runList(resolvedDeps);
+      case "show":
+        if (arg === undefined) {
+          return usageError(deps, "show requires a <sessionId>");
+        }
+        return runShow(arg, resolvedDeps);
       default:
         return usageError(deps, `unknown command "${command}"`);
     }
@@ -235,6 +244,24 @@ function runList(deps: CliDeps): number {
   return 0;
 }
 
+function runShow(sessionId: string, deps: CliDeps): number {
+  const asm = assembleSession(deps);
+  // `listTurns`/`sessionDuration` throw `Unknown session` on a missing id, but
+  // `getSession` returns undefined — check it first for a single clear message.
+  const session = asm.store.getSession(sessionId);
+  if (session === undefined) {
+    throw new Error(`No session found: ${sessionId}`);
+  }
+  asm.stdout.write(
+    renderSessionShow({
+      session,
+      turns: asm.store.listTurns(sessionId),
+      durationMs: asm.store.sessionDuration(sessionId),
+    }),
+  );
+  return 0;
+}
+
 async function finishSession(
   asm: SessionAssembly,
   repo: Repository,
@@ -246,15 +273,16 @@ async function finishSession(
     // `/quit` marks the session abandoned, which `resumeSession` rejects — a
     // resume hint here would send the user down a path that always fails.
     asm.stdout.write(
-      `\nSession ${sessionId} 已标记 abandoned，无法再恢复。可用 repocoach list 查看历史，或 repocoach start 重新开始。\n`,
+      `\nSession ${sessionId} 已标记 abandoned，无法再恢复。可用 repocoach show ${sessionId} 查看已保存的内容，或 repocoach start 重新开始。\n`,
     );
     return 0;
   }
   if (outcome.phase === "error") {
     // The session is in a terminal phase, so `resumeSession` refuses it; point
-    // the user at the persisted evidence instead of a resume that cannot work.
+    // the user at the persisted evidence (via `show`, which actually renders
+    // it) instead of a resume that cannot work.
     asm.stderr.write(
-      `Session ${sessionId} 进入 error 状态，无法继续。可用 repocoach list 查看已保存的部分证据，或 repocoach start 重新开始新的学习。\n`,
+      `Session ${sessionId} 进入 error 状态，无法继续。可用 repocoach show ${sessionId} 查看已保存的证据，或 repocoach start 重新开始新的学习。\n`,
     );
     return 1;
   }
@@ -448,7 +476,8 @@ function usageError(deps: CliDeps, message: string): number {
     "Usage:\n" +
       "  repocoach start <url-or-path> [--data-dir <dir>]\n" +
       "  repocoach resume <sessionId> [--data-dir <dir>]\n" +
-      "  repocoach list [--data-dir <dir>]\n",
+      "  repocoach list [--data-dir <dir>]\n" +
+      "  repocoach show <sessionId> [--data-dir <dir>]\n",
   );
   return 1;
 }
