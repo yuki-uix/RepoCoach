@@ -137,6 +137,13 @@ pnpm start -- show <sessionId>
 
 `src/eval/` 把此前手动做的事（管道灌答案、跑真模型、人工读日志算指标）自动化成可重复的 harness，并作为后续 #25 成本优化的测量仪器。它复用真实装配路径（含强制接地），用脚本化回答驱动完整 Session，再按 `fixtures/expectations/` 的标注计算指标：Evidence precision、Path accuracy、Assessment 一致率、Adaptation、Hallucination、单 Session 成本。
 
+指标口径：
+
+- **Evidence precision**：按「至少一个被引用的符号落在引用范围内」判定支持；reason 未声称任何符号的条目计为「不适用」（不计入分母），并在报告中单独列出供人工核查。
+- **Path accuracy**：期望调用链作为**子序列**匹配实际证据路径顺序（允许混入 README、类型定义等非链路文件）。
+- **Assessment 一致率**：除一致率外还输出**混淆矩阵**（标注 × 模型判定）。注意 `fixtures/expectations/answer-samples.json` 的标注是预置的；若出现持续性系统偏差，应先复核标注本身，而非直接判定模型不合格。
+- **Hallucination**：符号抽取只保留具备代码上下文的标识符（反引号包裹、camelCase/PascalCase、`name(` 调用、`path.ts` 文件名），散文中的全大写强调词（如 PARSE / VALIDATE）不再被当作符号。
+
 ```bash
 pnpm build          # eval 脚本运行的是构建产物 dist/eval/bin.js，需先 build
 

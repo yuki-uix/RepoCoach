@@ -9,9 +9,27 @@ import { makeEvalRun } from "./helpers";
 
 function metrics(overrides: Partial<ReportMetrics> = {}): ReportMetrics {
   return {
-    evidencePrecision: { supported: 5, total: 5, failures: [], precision: 1 },
+    evidencePrecision: {
+      supported: 5,
+      total: 5,
+      notApplicable: 0,
+      failures: [],
+      notApplicableDetails: [],
+      precision: 1,
+    },
     pathAccuracy: { expected: [], actual: [], matched: 0, total: 0, accuracy: 1 },
-    assessmentAgreement: { matched: 2, agreed: 2, total: 2, agreement: 1, disagreements: [] },
+    assessmentAgreement: {
+      matched: 2,
+      agreed: 2,
+      total: 2,
+      agreement: 1,
+      disagreements: [],
+      confusion: {
+        correct: { correct: 2, partial: 0, incorrect: 0, unknown: 0 },
+        partial: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
+        incorrect: { correct: 0, partial: 0, incorrect: 0, unknown: 0 },
+      },
+    },
     adaptation: {
       afterCorrect: "a",
       afterIncorrect: "b",
@@ -43,6 +61,8 @@ describe("report JSON", () => {
       "cost",
     ]);
     expect(typeof json.metrics.evidencePrecision.precision).toBe("number");
+    expect(typeof json.metrics.evidencePrecision.notApplicable).toBe("number");
+    expect(typeof json.metrics.assessmentAgreement.confusion).toBe("object");
     expect(typeof json.metrics.cost.wallClockMs).toBe("number");
     expect(typeof json.metrics.adaptation.adapted).toBe("boolean");
   });
@@ -81,5 +101,44 @@ describe("report rendering (terminal gate)", () => {
 
     expect(out).not.toContain("\n## forged");
     expect(out).toContain("repo ## forged");
+  });
+
+  it("shows the not-applicable count and keeps its details for review", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun(),
+      metrics: metrics({
+        evidencePrecision: {
+          supported: 4,
+          total: 4,
+          notApplicable: 1,
+          failures: [],
+          notApplicableDetails: [
+            { path: "README.md", startLine: 3, endLine: 5, reason: "no symbol claimed", missing: [] },
+          ],
+          precision: 1,
+        },
+      }),
+    });
+
+    const out = renderReport(report);
+
+    expect(out).toContain("(1 not applicable)");
+    expect(out).toContain("Evidence precision not applicable (no symbol claimed):");
+    expect(out).toContain("README.md:3-5");
+  });
+
+  it("renders the assessment confusion matrix and its annotation note", () => {
+    const report = buildReport({
+      mode: "mock",
+      run: makeEvalRun(),
+      metrics: metrics(),
+    });
+
+    const out = renderReport(report);
+
+    expect(out).toContain("Assessment confusion (annotation × model):");
+    expect(out).toContain("correct");
+    expect(out).toContain("Note: annotations are pre-authored in fixtures/expectations/answer-samples.json");
   });
 });

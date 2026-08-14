@@ -12,9 +12,14 @@
 import { writeFileSync } from "node:fs";
 import { neutralizeMarkdown, renderInline } from "../cli/markdown.js";
 import type { EvalRun } from "./types.js";
+import {
+  ASSESSMENT_LABELS,
+  MODEL_ASSESSMENT_LABELS,
+} from "./metrics.js";
 import type {
   AdaptationResult,
   AssessmentAgreementResult,
+  ConfusionMatrix,
   CostResult,
   HallucinationResult,
   PathAccuracyResult,
@@ -77,8 +82,11 @@ export function renderReport(report: EvalReport): string {
   lines.push(`feature:    ${renderInline(report.featureId)} — ${neutralizeMarkdown(report.featureGoal)}`);
   lines.push(`ended:      ${renderInline(report.endedPhase)}${report.degraded ? " (degraded)" : ""}`);
   lines.push("");
+  const precision = metrics.evidencePrecision;
+  const notApplicableSuffix =
+    precision.notApplicable > 0 ? `  (${precision.notApplicable} not applicable)` : "";
   lines.push(
-    `Evidence precision   ${metrics.evidencePrecision.supported} / ${metrics.evidencePrecision.total}  ${percent(metrics.evidencePrecision.precision)}`,
+    `Evidence precision   ${precision.supported} / ${precision.total}  ${percent(precision.precision)}${notApplicableSuffix}`,
   );
   lines.push(
     `Path accuracy        ${metrics.pathAccuracy.matched} / ${metrics.pathAccuracy.total}  ${percent(metrics.pathAccuracy.accuracy)}`,
@@ -96,16 +104,22 @@ export function renderReport(report: EvalReport): string {
     `Cost                 ${metrics.cost.inputTokens} in / ${metrics.cost.outputTokens} out tokens, ${metrics.cost.wallClockMs}ms`,
   );
 
-  if (metrics.evidencePrecision.failures.length > 0) {
+  if (precision.failures.length > 0) {
     lines.push("");
     lines.push("Evidence precision failures:");
-    for (const failure of metrics.evidencePrecision.failures) {
-      const missing =
-        failure.missing.length === 0
-          ? "(no symbol claimed)"
-          : failure.missing.map(renderInline).join(", ");
+    for (const failure of precision.failures) {
       lines.push(
-        `  - ${renderInline(failure.path)}:${failure.startLine}-${failure.endLine} missing ${missing} — ${neutralizeMarkdown(failure.reason)}`,
+        `  - ${renderInline(failure.path)}:${failure.startLine}-${failure.endLine} missing ${failure.missing.map(renderInline).join(", ")} — ${neutralizeMarkdown(failure.reason)}`,
+      );
+    }
+  }
+
+  if (precision.notApplicableDetails.length > 0) {
+    lines.push("");
+    lines.push("Evidence precision not applicable (no symbol claimed):");
+    for (const item of precision.notApplicableDetails) {
+      lines.push(
+        `  - ${renderInline(item.path)}:${item.startLine}-${item.endLine} — ${neutralizeMarkdown(item.reason)}`,
       );
     }
   }
@@ -120,6 +134,15 @@ export function renderReport(report: EvalReport): string {
     }
   }
 
+  if (metrics.assessmentAgreement.matched > 0) {
+    lines.push("");
+    lines.push("Assessment confusion (annotation × model):");
+    appendConfusionMatrix(lines, metrics.assessmentAgreement.confusion);
+    lines.push(
+      "Note: annotations are pre-authored in fixtures/expectations/answer-samples.json; a persistent systematic bias may mean the annotations need review, not that the model is unfit.",
+    );
+  }
+
   if (metrics.hallucination.missing.length > 0) {
     lines.push("");
     lines.push("Hallucinated (not found in source):");
@@ -129,6 +152,27 @@ export function renderReport(report: EvalReport): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+/** Append an aligned annotation × model count table. */
+function appendConfusionMatrix(lines: string[], confusion: ConfusionMatrix): void {
+  const header = ["annotation", ...MODEL_ASSESSMENT_LABELS];
+  const rows = ASSESSMENT_LABELS.map((label) => [
+    label,
+    ...MODEL_ASSESSMENT_LABELS.map((column) => String(confusion[label]?.[column] ?? 0)),
+  ]);
+  const table = [header, ...rows];
+  const widths = header.map((cell, index) => {
+    let width = cell.length;
+    for (const row of table) {
+      width = Math.max(width, row[index].length);
+    }
+    return width;
+  });
+  for (const row of table) {
+    const line = row.map((cell, index) => cell.padEnd(widths[index])).join(" ");
+    lines.push(`  ${line.trimEnd()}`);
+  }
 }
 
 function percent(ratio: number): string {

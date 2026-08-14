@@ -23,7 +23,7 @@ const CALL_CHAIN: CallChainStep[] = [
 ];
 
 describe("evidencePrecision", () => {
-  it("counts evidence whose range contains the claimed symbol", () => {
+  it("counts evidence whose range contains at least one claimed symbol", () => {
     const { reader, repo } = makeTempRepo({
       "src/index.ts": "export function createTracker() { return parseTask(); }\n",
       "src/other.ts": "export const unused = 1;\n",
@@ -43,12 +43,43 @@ describe("evidencePrecision", () => {
 
     expect(result.total).toBe(2);
     expect(result.supported).toBe(1);
+    expect(result.notApplicable).toBe(0);
     expect(result.precision).toBe(0.5);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]?.missing).toEqual(["parseTask"]);
   });
 
-  it("reports unsupported when no known symbol is claimed", () => {
+  it("supports a claim when any mentioned symbol is in the range, not every one", () => {
+    // The reason discusses parseTask's output type but cites the type-definition
+    // file; "ParsedTask" is in the range, so the claim is supported even though
+    // the known symbol "parseTask" is not literally present there.
+    const { reader, repo } = makeTempRepo({
+      "src/types.ts":
+        "/** A task that has been parsed. */\nexport interface ParsedTask { title: string }\n",
+    });
+    const run = makeEvalRun({
+      turns: [
+        makeTurn({
+          evidence: [
+            {
+              path: "src/types.ts",
+              startLine: 1,
+              endLine: 2,
+              reason: "ParsedTask defines what parseTask must return",
+            },
+          ],
+        }),
+      ],
+    });
+
+    const result = evidencePrecision(run, reader, repo, SYMBOLS);
+
+    expect(result.total).toBe(1);
+    expect(result.supported).toBe(1);
+    expect(result.failures).toHaveLength(0);
+  });
+
+  it("marks evidence with no claimed symbol as not applicable, outside the ratio", () => {
     const { reader, repo } = makeTempRepo({ "src/a.ts": "export const x = 1;\n" });
     const run = makeEvalRun({
       turns: [
@@ -61,7 +92,10 @@ describe("evidencePrecision", () => {
     const result = evidencePrecision(run, reader, repo, SYMBOLS);
 
     expect(result.supported).toBe(0);
-    expect(result.failures[0]?.missing).toEqual([]);
+    expect(result.total).toBe(0);
+    expect(result.notApplicable).toBe(1);
+    expect(result.failures).toHaveLength(0);
+    expect(result.notApplicableDetails[0]?.missing).toEqual([]);
   });
 });
 
@@ -85,13 +119,15 @@ describe("pathAccuracy", () => {
     expect(result.accuracy).toBe(1);
   });
 
-  it("penalises out-of-order steps", () => {
+  it("matches the expected chain as a subsequence amid unrelated files", () => {
     const run = makeEvalRun({
       turns: [
         makeTurn({
           evidence: [
-            { path: "src/parse/task.ts", startLine: 1, endLine: 1, reason: "a" },
-            { path: "src/index.ts", startLine: 1, endLine: 1, reason: "b" },
+            { path: "README.md", startLine: 1, endLine: 1, reason: "" },
+            { path: "src/index.ts", startLine: 1, endLine: 1, reason: "" },
+            { path: "src/types.ts", startLine: 1, endLine: 1, reason: "" },
+            { path: "src/parse/task.ts", startLine: 1, endLine: 1, reason: "" },
           ],
         }),
       ],
@@ -99,8 +135,28 @@ describe("pathAccuracy", () => {
 
     const result = pathAccuracy(run, CALL_CHAIN);
 
-    expect(result.matched).toBe(0);
-    expect(result.accuracy).toBe(0);
+    expect(result.matched).toBe(2);
+    expect(result.accuracy).toBe(1);
+  });
+
+  it("penalises steps that never appear in order", () => {
+    const run = makeEvalRun({
+      turns: [
+        makeTurn({
+          evidence: [
+            { path: "src/parse/task.ts", startLine: 1, endLine: 1, reason: "" },
+            { path: "src/index.ts", startLine: 1, endLine: 1, reason: "" },
+          ],
+        }),
+      ],
+    });
+
+    const result = pathAccuracy(run, CALL_CHAIN);
+
+    // "src/index.ts" appears only after "src/parse/task.ts", so the first
+    // expected step matches but the second cannot follow it in order.
+    expect(result.matched).toBe(1);
+    expect(result.accuracy).toBe(0.5);
   });
 });
 
@@ -128,6 +184,11 @@ describe("assessmentAgreement", () => {
     expect(result.agreed).toBe(1);
     expect(result.agreement).toBe(0.5);
     expect(result.disagreements).toHaveLength(1);
+    // The confusion matrix shows the annotation × model distribution.
+    expect(result.confusion.correct.correct).toBe(1);
+    expect(result.confusion.incorrect.partial).toBe(1);
+    expect(result.confusion.incorrect.incorrect).toBe(0);
+    expect(result.confusion.correct.unknown).toBe(0);
   });
 });
 
@@ -213,12 +274,48 @@ describe("hallucination", () => {
 
     expect(result.missing).toEqual(["exportToCsv"]);
   });
+
+  it("ignores all-caps prose and only flags the fabricated camelCase symbol", async () => {
+    const { reader, repo } = makeTempRepo({
+      "src/index.ts": "export function createTracker() {}\n",
+    });
+    const conclusion = "The pipeline is PARSE → VALIDATE → STORE; call `exportToCsv` to export.";
+
+    const result = await hallucination(conclusion, reader, repo);
+
+    expect(result.missing).toEqual(["exportToCsv"]);
+    expect(result.total).toBe(1);
+  });
+
+  it("resolves file-path symbols against the repo tree, not source contents", async () => {
+    const { reader, repo } = makeTempRepo({
+      "src/index.ts": "export const x = 1;\n",
+      "src/render/format.ts": "export function format() {}\n",
+    });
+    const conclusion = "See src/render/format.ts for the renderer.";
+
+    const result = await hallucination(conclusion, reader, repo);
+
+    expect(result.missing).toEqual([]);
+  });
 });
 
 describe("extractSymbolNames", () => {
   it("extracts camelCase and known lowercase symbols, not prose", () => {
     expect(extractSymbolNames("The entry calls createTracker and validate.", ["validate", "add"]))
       .toEqual(["createTracker", "validate"]);
+  });
+
+  it("skips all-caps prose but keeps CONST_NAME-shaped tokens", () => {
+    expect(
+      extractSymbolNames("PARSE → VALIDATE → STORE, guarded by MAX_RETRIES."),
+    ).toEqual(["MAX_RETRIES"]);
+  });
+
+  it("extracts backticked and call-form identifiers, not bare prose words", () => {
+    expect(
+      extractSymbolNames("Call `exportToCsv` and then add()."),
+    ).toEqual(["exportToCsv", "add"]);
   });
 });
 

@@ -10,6 +10,8 @@ export { runEvalSession } from "./runner.js";
 export type { RunSessionOptions } from "./runner.js";
 
 export {
+  ASSESSMENT_LABELS,
+  MODEL_ASSESSMENT_LABELS,
   adaptation,
   assessmentAgreement,
   DEFAULT_ADAPTATION_THRESHOLD,
@@ -25,8 +27,11 @@ export {
 export type {
   AdaptationResult,
   AssessmentAgreementResult,
+  AssessmentLabel,
+  ConfusionMatrix,
   CostResult,
   HallucinationResult,
+  ModelAssessmentLabel,
   PathAccuracyResult,
   PrecisionFailure,
   PrecisionResult,

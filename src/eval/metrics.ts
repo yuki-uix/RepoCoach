@@ -27,15 +27,21 @@ export interface PrecisionFailure {
 
 export interface PrecisionResult {
   supported: number;
+  /** Judgeable evidence items (supported + failed). */
   total: number;
+  /** Evidence items whose reason claimed no symbol — excluded from `total`. */
+  notApplicable: number;
   failures: PrecisionFailure[];
+  /** Not-applicable items, kept verbatim for human review. */
+  notApplicableDetails: PrecisionFailure[];
   precision: number;
 }
 
 /**
- * For each evidence item, check whether its (path, line range) actually
- * contains every known symbol its `reason` claims. `supported / total` is the
- * fraction whose cited range backs up the claim.
+ * For each evidence item, check whether its (path, line range) backs up the
+ * symbols its `reason` mentions. A claim is supported when at least one
+ * mentioned symbol appears in the cited range; an item whose reason mentions no
+ * symbol is not judgeable and is reported separately (excluded from the ratio).
  */
 export function evidencePrecision(
   run: EvalRun,
@@ -45,9 +51,14 @@ export function evidencePrecision(
 ): PrecisionResult {
   const evidence = run.turns.flatMap((turn) => turn.evidence);
   const failures: PrecisionFailure[] = [];
+  const notApplicableDetails: PrecisionFailure[] = [];
   let supported = 0;
   for (const item of evidence) {
-    const claimed = knownSymbols.filter((symbol) => wordIn(symbol, item.reason));
+    const claimed = extractSymbolNames(item.reason, knownSymbols);
+    if (claimed.length === 0) {
+      notApplicableDetails.push({ ...item, missing: [] });
+      continue;
+    }
     const failure = checkEvidence(item, claimed, reader, repo);
     if (failure === null) {
       supported += 1;
@@ -55,41 +66,39 @@ export function evidencePrecision(
       failures.push(failure);
     }
   }
-  const total = evidence.length;
+  const total = evidence.length - notApplicableDetails.length;
   return {
     supported,
     total,
+    notApplicable: notApplicableDetails.length,
     failures,
+    notApplicableDetails,
     precision: total === 0 ? 0 : supported / total,
   };
 }
 
-/** Returns null when the item is supported, otherwise the failure record. */
+/** Returns null when at least one claimed symbol is supported, else the failure. */
 function checkEvidence(
   item: Evidence,
   claimed: string[],
   reader: Reader,
   repo: Repository,
 ): PrecisionFailure | null {
-  if (claimed.length === 0) {
-    // No known symbol claimed — cannot verify, so count it as unsupported.
-    return { ...item, missing: [] };
-  }
   let content: string;
   try {
     content = reader.readFile(repo, item.path, item.startLine, item.endLine).content;
   } catch {
     return { ...item, missing: claimed };
   }
-  const missing = claimed.filter((symbol) => !wordIn(symbol, content));
-  return missing.length === 0
+  const supported = claimed.some((symbol) => wordIn(symbol, content));
+  return supported
     ? null
     : {
         path: item.path,
         startLine: item.startLine,
         endLine: item.endLine,
         reason: item.reason,
-        missing,
+        missing: claimed,
       };
 }
 
@@ -121,16 +130,21 @@ export function orderedPaths(run: EvalRun): string[] {
 }
 
 /**
- * Compare the session's call chain to the expected chain position-by-position;
- * `matched / expected.length` is the fraction of steps in the right place.
+ * Compare the session's call chain to the expected chain as a subsequence: the
+ * expected path sequence must appear in order within the actual evidence paths,
+ * allowing unrelated files (README, type definitions, …) to interleave.
+ * `matched / expected.length` is the fraction of steps appearing in order.
  */
 export function pathAccuracy(run: EvalRun, expected: CallChainStep[]): PathAccuracyResult {
   const actual = orderedPaths(run);
   const expectedPaths = expected.map((step) => step.path);
   let matched = 0;
-  const length = Math.min(actual.length, expectedPaths.length);
-  for (let i = 0; i < length; i++) {
-    if (actual[i] === expectedPaths[i]) matched += 1;
+  let cursor = 0;
+  for (const expectedPath of expectedPaths) {
+    const index = actual.indexOf(expectedPath, cursor);
+    if (index === -1) break;
+    matched += 1;
+    cursor = index + 1;
   }
   const total = expectedPaths.length;
   return {
@@ -153,18 +167,33 @@ export interface AgreementDisagreement {
   actual: string;
 }
 
+/** Annotation labels from `answer-samples.json` (rows of the confusion matrix). */
+export const ASSESSMENT_LABELS = ["correct", "partial", "incorrect"] as const;
+export type AssessmentLabel = (typeof ASSESSMENT_LABELS)[number];
+
+/** Model assessment labels (columns of the confusion matrix). */
+export const MODEL_ASSESSMENT_LABELS = ["correct", "partial", "incorrect", "unknown"] as const;
+export type ModelAssessmentLabel = (typeof MODEL_ASSESSMENT_LABELS)[number];
+
+/** Annotation (row) × model assessment (column) counts. */
+export type ConfusionMatrix = Record<string, Record<string, number>>;
+
 export interface AssessmentAgreementResult {
   matched: number;
   agreed: number;
   total: number;
   agreement: number;
   disagreements: AgreementDisagreement[];
+  /** Annotation (row) × model assessment (column) counts. */
+  confusion: ConfusionMatrix;
 }
 
 /**
  * For every sample answer actually assessed this run, compare the model's
  * assessment to the annotated `expectedAssessment`. `agreement` is the AC ratio
- * (threshold ≥ 80% per docs/mvp-spec.md §8).
+ * (threshold ≥ 80% per docs/mvp-spec.md §8). The `confusion` matrix shows the
+ * full annotation × model distribution so a systematic bias (e.g. the model
+ * grading more conservatively than the annotations) is visible at a glance.
  *
  * An assessment does not always sit on the same turn as the answer it judges:
  * the hypothesis → trace transition consumes the answer, and the trace turn
@@ -182,6 +211,7 @@ export function assessmentAgreement(
   let matched = 0;
   let agreed = 0;
   const disagreements: AgreementDisagreement[] = [];
+  const confusion = emptyConfusion();
   let lastUserAnswer: string | undefined;
   for (const turn of run.turns) {
     if (turn.userAnswer !== undefined) lastUserAnswer = turn.userAnswer;
@@ -189,6 +219,7 @@ export function assessmentAgreement(
     const sample = byAnswer.get(lastUserAnswer.trim());
     if (sample === undefined) continue;
     matched += 1;
+    confusion[sample.expectedAssessment][turn.assessment] += 1;
     if (turn.assessment === sample.expectedAssessment) {
       agreed += 1;
     } else {
@@ -206,7 +237,20 @@ export function assessmentAgreement(
     total: matched,
     agreement: matched === 0 ? 0 : agreed / matched,
     disagreements,
+    confusion,
   };
+}
+
+/** A confusion matrix pre-filled with zeros for every annotation × model cell. */
+function emptyConfusion(): ConfusionMatrix {
+  const table: ConfusionMatrix = {};
+  for (const label of ASSESSMENT_LABELS) {
+    table[label] = {};
+    for (const modelLabel of MODEL_ASSESSMENT_LABELS) {
+      table[label][modelLabel] = 0;
+    }
+  }
+  return table;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,21 +383,70 @@ export function sessionCost(run: EvalRun): CostResult {
 
 const IDENTIFIER_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
 
+/** A source-file path token like `src/types.ts` or `format.ts`. */
+const FILE_NAME_RE = /([\w$./-]+\.(?:ts|tsx|js|jsx|mjs|cjs))\b/g;
+
+/** True for symbols that look like a file path (basename ends in a source ext). */
+const SOURCE_FILE_RE = /\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+
 /**
- * Candidate symbol names from prose: snake_case identifiers, or camelCase /
- * PascalCase with a hump after the first character, plus any known symbol that
- * appears whole-word. Excluding sentence-capitalised prose ("The", "And") keeps
- * the candidate set to actual code symbols.
+ * Candidate symbol names from prose, restricted to tokens that carry a code
+ * context rather than prose emphasis:
+ *   - backtick-wrapped identifiers (`exportToCsv`)
+ *   - call form `name(`
+ *   - file paths like `src/types.ts`
+ *   - camelCase / PascalCase / snake_case identifiers
+ * plus any known symbol that appears whole-word (so lowercase known symbols
+ * like `validate` / `add` are still recognised).
+ *
+ * All-caps prose words (PARSE, VALIDATE, AFTER) are excluded from the code
+ * signals; CONST_NAME-shaped all-caps tokens (with an underscore) are kept and
+ * left to the downstream existence check.
  */
 export function extractSymbolNames(text: string, knownSymbols: string[] = []): string[] {
-  const codeLike = (text.match(IDENTIFIER_RE) ?? []).filter(isCodeLike);
-  const known = knownSymbols.filter((symbol) => wordIn(symbol, text));
-  return [...new Set([...codeLike, ...known])];
+  const candidates = new Set<string>();
+  const addCodeSignal = (token: string) => {
+    if (!isAllCapsProse(token)) candidates.add(token);
+  };
+
+  // Backtick-wrapped identifiers.
+  for (const match of text.matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)`/g)) {
+    addCodeSignal(match[1]);
+  }
+
+  // Call form `name(`.
+  for (const match of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)(?=\()/g)) {
+    addCodeSignal(match[1]);
+  }
+
+  // File paths like `src/types.ts`.
+  for (const match of text.matchAll(FILE_NAME_RE)) {
+    addCodeSignal(match[1]);
+  }
+
+  // camelCase / PascalCase / snake_case identifiers.
+  for (const match of text.matchAll(IDENTIFIER_RE)) {
+    const token = match[0];
+    if (isCodeLike(token)) addCodeSignal(token);
+  }
+
+  // Known symbols are authoritative even when lowercase ("validate", "add").
+  for (const symbol of knownSymbols) {
+    if (wordIn(symbol, text)) candidates.add(symbol);
+  }
+
+  return [...candidates];
 }
 
+/** A code-shaped identifier: snake_case, or camelCase/PascalCase with a hump. */
 function isCodeLike(token: string): boolean {
   if (token.length < 3) return false;
   return token.includes("_") || /[A-Z]/.test(token.slice(1));
+}
+
+/** All-caps prose emphasis (AFTER, PARSE) — not a symbol unless CONST_NAME-shaped. */
+function isAllCapsProse(token: string): boolean {
+  return token.length >= 2 && token === token.toUpperCase() && !token.includes("_");
 }
 
 function tokenize(text: string): string[] {
@@ -394,8 +487,19 @@ async function symbolExists(
   repo: Repository,
   symbol: string,
 ): Promise<boolean> {
+  if (SOURCE_FILE_RE.test(symbol)) {
+    return fileExists(reader, repo, symbol);
+  }
   const matches = await reader.search(repo, escapeRegExp(symbol));
   return matches.some((match) => isSourcePath(match.path));
+}
+
+/** True when a filename-shaped symbol names a file present in the repo tree. */
+function fileExists(reader: Reader, repo: Repository, path: string): boolean {
+  const normalized = path.replace(/^\.\/+/, "").split("\\").join("/");
+  return reader
+    .getTree(repo)
+    .some((entry) => entry.path === normalized || entry.path.endsWith(`/${normalized}`));
 }
 
 const JACCARD_STOPWORDS = new Set([
