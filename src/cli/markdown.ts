@@ -22,10 +22,10 @@
  * could smuggle in (`ESC[2J` clears the screen, `ESC]8;;…` opens a hyperlink).
  * Every byte written to the terminal therefore flows through
  * `stripTerminalControls` first: it removes whole ESC-led sequences plus the
- * remaining C0 controls and DEL, keeping only `\n` (multi-line blocks need it)
- * and folding `\t` to a space. Untrusted text is stripped *before* any of our
- * own dim/bold styles are applied, so our styles survive while injected
- * sequences do not.
+ * remaining C0 controls, the C1 block (0x80–0x9f) and DEL, keeping only `\n`
+ * (multi-line blocks need it) and folding `\t` to a space. Untrusted text is
+ * stripped *before* any of our own dim/bold styles are applied, so our styles
+ * survive while injected sequences do not.
  *
  * Every interpolated value in the render layer is untrusted by default — there
  * is deliberately no whitelist of "safe-looking" fields. A path comes from a
@@ -60,12 +60,14 @@ export function bold(text: string): string {
  * The terminal interprets ESC-led sequences (CSI `ESC[`, OSC `ESC]`, and the
  * single-character `ESC` forms) as cursor / clear / hyperlink commands, so a
  * hostile string must not be able to smuggle one through. This removes each
- * whole ESC-led sequence, then drops every remaining C0 control and DEL, while
- * preserving `\n` (multi-line blocks need line breaks) and folding `\t` to a
- * single space so a tab cannot derail a fixed-width indent. Implemented as a
- * character loop rather than a control-character regex (eslint
- * no-control-regex). Every untrusted string bound for stdout/stderr must pass
- * through here before any of our own dim/bold styles are applied.
+ * whole ESC-led sequence, then drops every remaining C0 control, the C1 block
+ * (0x80–0x9f, whose 8-bit CSI/OSC forms a C1-capable terminal would execute
+ * without any ESC), and DEL, while preserving `\n` (multi-line blocks need line
+ * breaks) and folding `\t` to a single space so a tab cannot derail a
+ * fixed-width indent. Implemented as a character loop rather than a
+ * control-character regex (eslint no-control-regex). Every untrusted string
+ * bound for stdout/stderr must pass through here before any of our own dim/bold
+ * styles are applied.
  */
 export function stripTerminalControls(text: string): string {
   let out = "";
@@ -130,9 +132,18 @@ export function stripTerminalControls(text: string): string {
       out += "\n";
     } else if (code === 0x09) {
       out += " ";
-    } else if (code >= 0x20 && code !== 0x7f) {
+    } else if ((code >= 0x20 && code <= 0x7e) || code >= 0xa0) {
       out += text[i]!;
     }
+    // Everything else is dropped: remaining C0 controls (< 0x20), DEL (0x7f),
+    // and the whole C1 block (0x80–0x9f). C1 includes the 8-bit CSI (0x9b) and
+    // OSC (0x9d) forms, which a C1-capable terminal would still execute even
+    // without an ESC prefix. We strip the entire range rather than parsing
+    // 8-bit CSI/OSC parameters: any leftover parameter text ("2J",
+    // "8;;http://evil") is inert once its C1 introducer is gone — it is plain
+    // printable ASCII that can no longer clear the screen or open a hyperlink —
+    // and dropping the range wholesale is simpler and covers every C1 control
+    // (NEL 0x85, DCS 0x90, etc.), not just the two sequence leaders.
     i += 1;
   }
   return out;

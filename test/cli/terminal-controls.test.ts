@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatEvidence,
+  renderInline,
   renderQuestion,
   renderUntrustedBlock,
   stripTerminalControls,
@@ -14,6 +15,17 @@ const BEL = String.fromCharCode(7);
 /** Count ESC bytes without a control-character regex (eslint no-control-regex). */
 function escCount(text: string): number {
   return text.split(ESC).length - 1;
+}
+
+/** True if any code unit lies in the C1 block (U+0080–U+009F). */
+function hasC1(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0x80 && code <= 0x9f) {
+      return true;
+    }
+  }
+  return false;
 }
 
 describe("stripTerminalControls", () => {
@@ -35,6 +47,24 @@ describe("stripTerminalControls", () => {
     expect(stripTerminalControls(`a${String.fromCharCode(1)}b${String.fromCharCode(127)}c`)).toBe(
       "abc",
     );
+  });
+
+  it("strips the 8-bit CSI and OSC forms plus every other C1 code point", () => {
+    const C1_CSI = String.fromCharCode(0x9b);
+    const C1_OSC = String.fromCharCode(0x9d);
+    expect(stripTerminalControls(`${C1_CSI}2Jok`)).toBe("2Jok");
+    expect(stripTerminalControls(`${C1_OSC}8;;http://evil${BEL}link`)).toBe(
+      "8;;http://evillink",
+    );
+    for (let code = 0x80; code <= 0x9f; code++) {
+      expect(stripTerminalControls(`a${String.fromCharCode(code)}b`)).toBe("ab");
+    }
+  });
+
+  it("leaves non-ASCII multibyte text (CJK, emoji, accented Latin) intact", () => {
+    expect(stripTerminalControls("中文内容")).toBe("中文内容");
+    expect(stripTerminalControls("café résumé")).toBe("café résumé");
+    expect(stripTerminalControls("🚀 done 🎉")).toBe("🚀 done 🎉");
   });
 });
 
@@ -98,5 +128,22 @@ describe("flowing-text terminal control stripping", () => {
     expect(err).not.toContain("http://evil");
     expect(err).not.toContain("[2J");
     expect(escCount(err)).toBe(2); // only the dim wrapper's two ESC bytes
+  });
+});
+
+describe("C1 control stripping through the render layer", () => {
+  const C1_CSI = String.fromCharCode(0x9b); // 8-bit CSI
+  const C1_OSC = String.fromCharCode(0x9d); // 8-bit OSC
+
+  it("renderUntrustedBlock leaves no C1 code point in the output", () => {
+    const out = renderUntrustedBlock(`${C1_CSI}2J${C1_OSC}8;;http://evil`);
+    expect(hasC1(out)).toBe(false);
+    expect(out).toContain("│ 2J8;;http://evil");
+  });
+
+  it("renderInline leaves no C1 code point in the output", () => {
+    const out = renderInline(`x${C1_CSI}2J${C1_OSC}8;;http://evil`);
+    expect(hasC1(out)).toBe(false);
+    expect(out).toBe("x2J8;;http://evil");
   });
 });
