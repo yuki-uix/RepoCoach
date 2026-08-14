@@ -29,7 +29,11 @@ import {
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { formatZodError } from "./errors.js";
 import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
-import { MAX_HISTORY_SUMMARY_BYTES, byteLength } from "./limits.js";
+import {
+  MAX_CARRIED_CONTEXT_BYTES,
+  MAX_HISTORY_SUMMARY_BYTES,
+  byteLength,
+} from "./limits.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type {
@@ -45,6 +49,11 @@ import {
   type EvidenceValidator,
   type ToolRegistry,
 } from "./tools.js";
+import {
+  SessionReadCache,
+  formatCarriedBlock,
+  selectCarryRanges,
+} from "./read-cache.js";
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -79,6 +88,13 @@ export interface AgentLoopOptions {
   evidenceValidator?: EvidenceValidator;
   /** Per-turn record of tool returns; reset at the start of every turn. */
   ledger?: ToolReturnLedger;
+  /**
+   * Session-level record of already-read file ranges, carried across turns so
+   * the model does not re-read the same files every turn (issue #25). Defaults
+   * to a fresh in-memory cache when not injected — a resumed session rebuilds
+   * it empty, so its first turn re-reads (see read-cache.ts).
+   */
+  readCache?: SessionReadCache;
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -144,6 +160,7 @@ export class AgentLoop {
   private readonly maxDecisionRetries: number;
   private readonly evidenceValidator?: EvidenceValidator;
   private readonly ledger?: ToolReturnLedger;
+  private readonly readCache: SessionReadCache;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
@@ -152,11 +169,13 @@ export class AgentLoop {
     this.provider = options.provider;
     this.evidenceValidator = options.evidenceValidator;
     this.ledger = options.ledger;
+    this.readCache = options.readCache ?? new SessionReadCache();
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
       evidenceValidator: options.evidenceValidator,
       returnRecorder: options.ledger,
+      readCache: this.readCache,
     });
     this.model = options.model ?? DEFAULT_DEEPSEEK_MODEL;
     this.maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
@@ -237,6 +256,15 @@ export class AgentLoop {
             // fabricated evidence straight into submit_decision.
             const groundingError = this.validateDecisionEvidence(outcome.decision);
             if (groundingError === null) {
+              // The accepted citations are the ranges the model keeps referring
+              // back to; mark them so the carry budget keeps them next turn.
+              for (const evidence of outcome.decision.evidence) {
+                this.readCache.markCited(
+                  evidence.path,
+                  evidence.startLine,
+                  evidence.endLine,
+                );
+              }
               this.emit({ type: "decision_submitted", decision: outcome.decision });
               this.logger.info("agent decision submitted", {
                 nextAction: outcome.decision.nextAction,
@@ -303,8 +331,38 @@ export class AgentLoop {
         content: wrapUntrustedContext(history, { kind: "turn_history" }),
       });
     }
+    const carried = this.buildCarriedContextBlock(input.turnHistory.length);
+    if (carried !== null) {
+      messages.push({
+        role: "user",
+        content: wrapUntrustedContext(carried, { kind: "already_read" }),
+      });
+    }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;
+  }
+
+  /**
+   * Build the cross-turn "already-read" context block for turn 2 onward. Carries
+   * a byte-bounded subset of the session read cache with full content (recording
+   * exactly those ranges into the ledger as context-carried, so they become
+   * citable without a re-read) and downgrades the rest to path + line range.
+   * Returns null on the first turn or when the cache is empty.
+   */
+  private buildCarriedContextBlock(turnIndex: number): string | null {
+    if (turnIndex === 0 || this.readCache.ranges.length === 0) {
+      return null;
+    }
+    const { carry, omitted } = selectCarryRanges(
+      this.readCache.ranges,
+      MAX_CARRIED_CONTEXT_BYTES,
+    );
+    // Only the ranges whose content actually landed in context are citable;
+    // the downgraded (content-omitted) ranges must be re-read before citing.
+    for (const range of carry) {
+      this.ledger?.recordCarried(range.path, range.startLine, range.endLine);
+    }
+    return formatCarriedBlock(carry, omitted);
   }
 
   private async callProvider(

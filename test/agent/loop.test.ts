@@ -11,6 +11,7 @@ import {
   REPO_DATA_END,
   REPO_DATA_START,
   REPO_DATA_WARNING,
+  SessionReadCache,
   UNTRUSTED_DATA_END,
   UNTRUSTED_DATA_START,
   buildSystemPrompt,
@@ -25,6 +26,11 @@ import {
   type TokenUsage,
 } from "../../src/agent";
 import type { LearningTurn } from "../../src/domain";
+import {
+  GroundingEvidenceValidator,
+  InMemoryEvidenceStore,
+  ToolReturnLedger,
+} from "../../src/evidence";
 import { createReader, type Repository } from "../../src/reader";
 import { makeTempReader, sseLine, sseResponse } from "./helpers";
 
@@ -484,5 +490,167 @@ describe("AgentLoop", () => {
     expect(summary).not.toBeNull();
     expect(summary).toContain("omitted");
     expect(byteLength(summary!)).toBeLessThanOrEqual(MAX_HISTORY_SUMMARY_BYTES);
+  });
+});
+
+describe("AgentLoop cross-turn read cache", () => {
+  const priorTurn: LearningTurn = {
+    sessionId: "s1",
+    question: "Where does it start?",
+    userAnswer: "index.ts",
+    evidence: [],
+    assessment: "correct",
+  };
+
+  function groundingLoop(provider: ChatProvider, readCache: SessionReadCache): {
+    loop: AgentLoop;
+    store: InMemoryEvidenceStore;
+  } {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({
+      ledger,
+      store,
+      sessionId: "s1",
+    });
+    const loop = new AgentLoop({
+      provider,
+      reader,
+      repo,
+      evidenceValidator: validator,
+      ledger,
+      readCache,
+    });
+    return { loop, store };
+  }
+
+  it("carries already-read ranges into a later turn and grounds citations of them", async () => {
+    const readCache = new SessionReadCache();
+    readCache.record("src/index.ts", 1, 3, "1 | export function add(a: number, b: number): number {");
+    const cited = {
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 3,
+      reason: "entry",
+    };
+
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage(
+        "t",
+        "submit_decision",
+        JSON.stringify({ evidence: [cited], assessment: "correct", nextAction: "show_evidence" }),
+      ),
+    );
+    const { loop, store } = groundingLoop(provider, readCache);
+
+    const result = await loop.invoke({
+      phase: "trace",
+      featureGoal: "g",
+      turnHistory: [priorTurn],
+    });
+
+    // The citation passed grounding without any repo_read_file this turn — the
+    // carried range is citable because its content was re-injected.
+    expect(result.decision.evidence).toEqual([cited]);
+    expect(store.listBySession("s1")).toEqual([
+      { sessionId: "s1", turnIndex: 1, evidence: cited },
+    ]);
+
+    // The carried block is a wrapped untrusted-context message carrying the
+    // already-read content, never the system prompt.
+    const carriedMessage = requests[0].messages.find(
+      (m) => m.role === "user" && (m.content ?? "").includes("kind=already_read"),
+    );
+    expect(carriedMessage).toBeDefined();
+    expect(carriedMessage?.content).toContain("src/index.ts (lines 1-3):");
+    expect(carriedMessage?.content).toContain("export function add");
+    expect(carriedMessage?.content).toContain(UNTRUSTED_DATA_START);
+    expect(carriedMessage?.content).toContain(UNTRUSTED_DATA_END);
+  });
+
+  it("does not carry or ground cached ranges on the first turn", async () => {
+    const readCache = new SessionReadCache();
+    // The range IS in the cache, but the first turn (no turn history) does not
+    // carry it into context — so citing it is rejected like any fabricated claim.
+    readCache.record("src/index.ts", 1, 3, "1 | export function add");
+
+    const fabricated = {
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 3,
+      reason: "never carried",
+    };
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage(
+        "t",
+        "submit_decision",
+        JSON.stringify({ evidence: [fabricated], assessment: "correct", nextAction: "show_evidence" }),
+      ),
+    );
+    const { loop, store } = groundingLoop(provider, readCache);
+
+    await expect(
+      loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    expect(requests).toHaveLength(3); // initial + 2 grounding retries
+    expect(store.listBySession("s1")).toEqual([]);
+    // No already-read block is emitted on turn 1.
+    const carriedMessage = requests[0].messages.some(
+      (m) => (m.content ?? "").includes("kind=already_read"),
+    );
+    expect(carriedMessage).toBe(false);
+  });
+
+  it("defaults to a fresh cache and carries a turn-1 read into turn 2", async () => {
+    // No readCache injected — the loop's default assembly path creates one and
+    // must carry the turn-1 read into turn-2's context (issue #25).
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({
+      ledger,
+      store,
+      sessionId: "s1",
+    });
+
+    const cited = {
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 3,
+      reason: "entry",
+    };
+    const { provider, requests } = scriptedProvider((index) =>
+      index === 0
+        ? toolMessage("t1", "repo_read_file", JSON.stringify({ path: "src/index.ts" }))
+        : toolMessage("t2", "submit_decision", JSON.stringify({ evidence: [cited], nextAction: "finish" })),
+    );
+    const loop = new AgentLoop({
+      provider,
+      reader,
+      repo,
+      evidenceValidator: validator,
+      ledger,
+    });
+
+    // Turn 1: read the file, submit an empty decision.
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    // Turn 2: cite the turn-1 read without re-reading — grounded via the carry.
+    const result = await loop.invoke({
+      phase: "trace",
+      featureGoal: "g",
+      turnHistory: [priorTurn],
+    });
+
+    expect(result.decision.evidence).toEqual([cited]);
+    // The turn-2 request carries the already-read block from turn 1's read.
+    const turn2 = requests[2];
+    const carriedMessage = turn2.messages.find(
+      (m) => m.role === "user" && (m.content ?? "").includes("kind=already_read"),
+    );
+    expect(carriedMessage?.content).toContain("src/index.ts (lines 1-3):");
+    expect(carriedMessage?.content).toContain("export function add");
   });
 });

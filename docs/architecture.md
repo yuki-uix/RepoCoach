@@ -22,6 +22,8 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 模型不能凭空写出证据引用。`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)，由服务端持有工具返回记录做交集校验。幻觉引用在架构上被拒绝，而不是靠事后评估测量。
 
+跨轮读缓存（issue #25）扩展了这一语义：Agent Loop 会把上一轮已读的文件范围按字节预算择要携带进下一轮上下文，接地闸同步接受"本轮上下文实际携带"的范围——只认真正带进上下文的那些，被降级为"只列 path 不带内容"的范围不可引用（与截断只记实际显示行是同一纪律）。
+
 ## 2. 逻辑架构
 
 ```text
@@ -110,7 +112,8 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 - 传递结构化上下文（当前 phase、功能目标、历史轮次摘要）；
 - 流式输出，让工具调用和推理过程对用户可见（单轮预期 20–60s，等待必须可视化）；
 - 记录本轮所有工具返回的 (path, 行号范围)，供证据接地校验；
-- 将模型输出解析为 `AgentDecision` 并做 Schema 校验。
+- 将模型输出解析为 `AgentDecision` 并做 Schema 校验；
+- 跨轮读缓存（issue #25）：`SessionReadCache` 记录本 Session 内经 `repo_read_file` 返回的 (path, 行号范围, 内容)，跨轮存活（与账本的 `resetTurn` 无关）。第 2 轮起组装消息时，把缓存内容按 `MAX_CARRIED_CONTEXT_BYTES`（默认 24 KiB）择要携带进上下文，优先保留最近使用与被引用过的范围，其余只列 path 与行号范围并注明"如需内容请重读"。该区块经 data-guard 包裹（仓库数据永不进 system prompt）。缓存不持久化——resume 后第一轮没有已读上下文，模型会重读，此为接受的取舍。
 
 第一版模型使用 DeepSeek `deepseek-v4-flash`。API Key 从仓库根目录的 `.env.local` 读取（已被 `.env.*` 忽略规则覆盖），只在服务端使用，不进日志。模型调用封装在独立 provider 接口后，保持可替换。
 
@@ -205,6 +208,7 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 
 - 证据引用有两个出口——`repo_save_evidence` 工具与 `submit_decision.evidence` 字段——两者都必须过 `EvidenceValidator`，且 **grounding validator 在生产组装入口是强制注入项**：`acceptAllEvidence` 仅供单测使用，CLI/API 组装时不注入接地校验即为缺陷；
 - 文件内容有四个出口——read-file、search、tree、**package-info**——四者都必须过 fs-guard 与统一的 filters 谓词（package-info 曾以 `readFileSync` 裸读 `package.json`，符号链接可越界，正是本条规则要抓的形态）；
+- 跨轮读缓存（issue #25）新增一个"文件内容重新进入上下文"的出口：`SessionReadCache` 的内容在下一轮被携带进 prompt 时，必须经 `wrapUntrustedContext` 包裹（仓库数据永不进 system prompt），且接地闸只认**本轮真正携带了内容**的范围——范围在缓存里但本轮被降级为"只列 path 不带内容"的，一律不可引用。
 - 新增任何"模型输出进入产品状态"的路径（未来的 recap 生成、UI 展示等）时，先问：这类数据已有的闸在哪，新路径过了吗。
 
 Review checklist：改动引入新的输出/保存路径时，diff 里必须能指出它复用的闸；指不出即打回。

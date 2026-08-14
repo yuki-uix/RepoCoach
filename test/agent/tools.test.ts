@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_TOOL_RESULT_BYTES,
+  SessionReadCache,
   byteLength,
   createToolRegistry,
   type Evidence,
@@ -369,6 +370,65 @@ describe("same-turn read dedup", () => {
     });
 
     expect(second).toContain("2 |   return a + b;");
+  });
+});
+
+describe("carried-range read dedup", () => {
+  it("returns a short hint instead of re-sending a range already carried in context", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    ledger.recordCarried("src/index.ts", 1, 3);
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("本轮上下文中已携带");
+    expect(result).not.toContain("return a + b");
+  });
+
+  it("does not dedup a sub-range of a carried range", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    ledger.recordCarried("src/index.ts", 1, 3);
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 2, endLine: 2 },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("2 |   return a + b;");
+  });
+});
+
+describe("session read cache recording", () => {
+  it("records the shown range and numbered content into the cache", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const cache = new SessionReadCache();
+    const registry = createToolRegistry({ reader, repo, readCache: cache });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 99 },
+      collectedEvidence: [],
+    });
+
+    // The request for 1-99 is clamped to the file's 3 lines; the cached range is
+    // the shown range, and its content is the numbered lines.
+    expect(cache.ranges).toHaveLength(1);
+    const cached = cache.ranges[0]!;
+    expect(cached.path).toBe("src/index.ts");
+    expect(cached.startLine).toBe(1);
+    expect(cached.endLine).toBe(3);
+    expect(cached.content).toContain("export function add");
+    expect(cached.content).toContain("return a + b;");
+    expect(cached.lastUsed).toBe(1);
+    expect(cached.cited).toBe(false);
   });
 });
 

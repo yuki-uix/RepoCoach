@@ -13,6 +13,14 @@
 export const MAX_TOOL_RESULT_BYTES = 8 * 1024;
 /** Maximum bytes of the summarized turn history before older turns collapse. */
 export const MAX_HISTORY_SUMMARY_BYTES = 4 * 1024;
+/**
+ * Maximum bytes of already-read file content carried into a later turn's
+ * context (issue #25). Content beyond this is downgraded to path + line range
+ * only. Carrying a full tool result per file is bounded by
+ * MAX_TOOL_RESULT_BYTES (8 KiB), so this comfortably fits ~3 whole reads; the
+ * number is re-measured once real-model cross-turn savings are known.
+ */
+export const MAX_CARRIED_CONTEXT_BYTES = 24 * 1024;
 
 export function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");

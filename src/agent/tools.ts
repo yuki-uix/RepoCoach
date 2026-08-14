@@ -34,6 +34,7 @@ import {
   truncateBytes,
 } from "./limits.js";
 import type { ToolDefinition } from "./provider.js";
+import type { SessionReadCache } from "./read-cache.js";
 
 export interface EvidenceValidator {
   validate(evidence: Evidence): { ok: true } | { ok: false; reason: string };
@@ -57,6 +58,8 @@ export interface ReturnRecorder {
   record(path: string, startLine: number, endLine: number): void;
   /** True when this exact (path, inclusive line range) was already returned this turn. */
   hasRead?(path: string, startLine: number, endLine: number): boolean;
+  /** True when this exact range was carried into the current turn's context. */
+  hasCarried?(path: string, startLine: number, endLine: number): boolean;
 }
 
 export interface ToolRuntime {
@@ -64,6 +67,8 @@ export interface ToolRuntime {
   repo: Repository;
   evidenceValidator?: EvidenceValidator;
   returnRecorder?: ReturnRecorder;
+  /** Session-level record of shown file ranges, carried across turns (issue #25). */
+  readCache?: SessionReadCache;
 }
 
 export interface ToolExecution {
@@ -402,6 +407,11 @@ function readFile(
     args.startLine,
     args.endLine,
   );
+  // The range is already carried into this turn's context (cross-turn cache):
+  // point at it instead of re-sending the full text (issue #25, token waste).
+  if (runtime.returnRecorder?.hasCarried?.(args.path, slice.startLine, slice.endLine)) {
+    return `${args.path} (lines ${slice.startLine}-${slice.endLine}) 本轮上下文中已携带，见上文，无需重读。`;
+  }
   // Same-turn re-read of the exact range: point at the earlier result instead
   // of re-sending the full text (issue #23, token waste).
   if (runtime.returnRecorder?.hasRead?.(args.path, slice.startLine, slice.endLine)) {
@@ -428,16 +438,15 @@ function readFile(
     MAX_TOOL_RESULT_BYTES - reservedBytes,
     slice.startLine,
   );
-  // Record only whole lines actually shown — a byte-truncated first line (or a
-  // truncated tail) must not be citable.
-  if (fit.keptLines > 0) {
-    runtime.returnRecorder?.record(
-      args.path,
-      slice.startLine,
-      slice.startLine + fit.keptLines - 1,
-    );
-  }
   const numbered = numberLines(fit.content, slice.startLine);
+  // Record only whole lines actually shown — a byte-truncated first line (or a
+  // truncated tail) must not be citable. The session read cache mirrors the
+  // same shown range, so only exactly what the model saw can be carried later.
+  if (fit.keptLines > 0) {
+    const endLine = slice.startLine + fit.keptLines - 1;
+    runtime.returnRecorder?.record(args.path, slice.startLine, endLine);
+    runtime.readCache?.record(args.path, slice.startLine, endLine, numbered);
+  }
   if (!fit.truncated) {
     return `${header}\n${numbered}`;
   }
