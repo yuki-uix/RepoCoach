@@ -10,12 +10,14 @@
  *
  * Every untrusted (model- or repo-derived) field — question, answer, feedback,
  * evidence reason — passes through the same `neutralizeMarkdown` /
- * `formatEvidence` gate as recap and session-runner (docs/architecture.md §6
- * "同一道闸覆盖所有出口"); none is ever rendered raw.
+ * `formatEvidence` gate as recap and session-runner, and structured fields
+ * (path, repository id, workspace path, session id, phase, status) go through
+ * `renderInline` so a multi-line value can never break out of a single-line
+ * slot (docs/architecture.md §6 "同一道闸覆盖所有出口"); none is rendered raw.
  */
 
 import type { LearningSession, LearningTurn } from "../domain/index.js";
-import { neutralizeMarkdown } from "./markdown.js";
+import { neutralizeMarkdown, renderInline } from "./markdown.js";
 import { dedupeEvidence, formatDuration } from "./recap.js";
 import { formatEvidence } from "./session-runner.js";
 
@@ -29,13 +31,13 @@ export function renderSessionShow(deps: ShowDeps): string {
   const { session, turns, durationMs } = deps;
   const lines: string[] = [];
 
-  lines.push(`## Session ${session.id}`);
-  lines.push(`仓库: ${session.repositoryId}`);
+  lines.push(`## Session ${renderInline(session.id)}`);
+  lines.push(`仓库: ${renderInline(session.repositoryId)}`);
   if (session.workspacePath !== undefined) {
-    lines.push(`Workspace: ${session.workspacePath}`);
+    lines.push(`Workspace: ${renderInline(session.workspacePath)}`);
   }
-  lines.push(`阶段: ${session.phase}`);
-  lines.push(`状态: ${session.status}`);
+  lines.push(`阶段: ${renderInline(session.phase)}`);
+  lines.push(`状态: ${renderInline(session.status)}`);
   lines.push(`耗时: ${formatDuration(durationMs)}`);
   lines.push("");
 
@@ -48,7 +50,7 @@ export function renderSessionShow(deps: ShowDeps): string {
       lines.push(`问题: ${neutralizeMarkdown(turn.question)}`);
       lines.push(renderAnswer(turn));
       if (turn.assessment !== undefined) {
-        lines.push(`评估: ${turn.assessment}`);
+        lines.push(`评估: ${renderInline(turn.assessment)}`);
       }
       if (turn.feedback !== undefined && turn.feedback !== "") {
         lines.push(`反馈: ${neutralizeMarkdown(turn.feedback)}`);

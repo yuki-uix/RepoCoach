@@ -11,7 +11,7 @@
 import type { Evidence, LearningTurn } from "../domain/index.js";
 import type { EvidenceStore } from "../evidence/index.js";
 import type { Reader, Repository } from "../reader/index.js";
-import { neutralizeMarkdown, renderUntrustedBlock } from "./markdown.js";
+import { neutralizeMarkdown, renderInline, renderUntrustedBlock } from "./markdown.js";
 
 export interface RecapDeps {
   sessionId: string;
@@ -98,7 +98,9 @@ export function renderRecap(deps: RecapDeps): string {
 
   sections.push("## 功能调用链");
   sections.push(
-    records.length === 0 ? "(无接地证据)" : records.map((record) => record.path).join(" → "),
+    records.length === 0
+      ? "(无接地证据)"
+      : records.map((record) => renderInline(record.path)).join(" → "),
   );
 
   sections.push("## 关键模块及职责");
@@ -111,7 +113,7 @@ export function renderRecap(deps: RecapDeps): string {
         continue;
       }
       seen.add(record.path);
-      sections.push(`${record.path} — ${neutralizeMarkdown(record.reason)}`);
+      sections.push(`${renderInline(record.path)} — ${neutralizeMarkdown(record.reason)}`);
     }
   }
 
@@ -142,7 +144,7 @@ export function renderRecap(deps: RecapDeps): string {
     for (const record of records) {
       const context = deps.evidenceStore.getSourceContext(record, deps.reader, deps.repo);
       sections.push(
-        `${record.path}:${record.startLine}-${record.endLine} — ${neutralizeMarkdown(record.reason)}`,
+        `${renderInline(record.path)}:${renderInline(record.startLine)}-${renderInline(record.endLine)} — ${neutralizeMarkdown(record.reason)}`,
       );
       sections.push(renderUntrustedBlock(context.content));
       sections.push("");

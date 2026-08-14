@@ -3,6 +3,7 @@ import {
   formatEvidence,
   neutralizeMarkdown,
   renderDecision,
+  renderInline,
   renderQuestion,
   renderRecap,
   renderUntrustedBlock,
@@ -31,6 +32,27 @@ describe("neutralizeMarkdown", () => {
 
   it("introduces no backslash escape noise", () => {
     expect(neutralizeMarkdown("## 假段落\n```")).not.toContain("\\");
+  });
+});
+
+describe("renderInline", () => {
+  it("collapses newlines into a single line and neutralizes a forged heading", () => {
+    expect(renderInline("src\n## forged-path")).toBe("src ## forged-path");
+    expect(renderInline("src\r\n## forged-path")).toBe("src ## forged-path");
+    expect(renderInline("src\n## forged-path")).not.toContain("\n");
+  });
+
+  it("neutralizes a value that itself opens with a heading", () => {
+    expect(renderInline("## forged")).toBe(" ## forged");
+    expect(renderInline("\n## forged")).toBe(" ## forged");
+  });
+
+  it("strips control characters", () => {
+    expect(renderInline("a\tb\x1b[31mc")).toBe("ab[31mc");
+  });
+
+  it("leaves a plain single-line value intact", () => {
+    expect(renderInline("src/index.ts")).toBe("src/index.ts");
   });
 });
 
@@ -134,6 +156,30 @@ describe("recap markdown neutralization", () => {
   it("emits no backslash escape noise anywhere", () => {
     expect(recap()).not.toMatch(/\\[#`]/);
   });
+
+  it("collapses a newline in an evidence path so the call chain stays single-line", () => {
+    const out = renderRecap({
+      sessionId: "s1",
+      evidenceStore: fakeStore(),
+      reader: undefined as unknown as Reader,
+      repo: undefined as unknown as Repository,
+      turns: [
+        {
+          sessionId: "s1",
+          question: "q",
+          evidence: [
+            { path: "src\n## forged-path", startLine: 1, endLine: 2, reason: "r" },
+          ],
+        },
+      ],
+      finalFeedback: "",
+      durationMs: 30_000,
+    });
+    // The path is rendered as a single line, not a column-0 heading.
+    expect(out).toContain("src ## forged-path");
+    expect(out).not.toMatch(/^## forged-path/m);
+    expect(topLevelHeadings(out)).not.toContain("## forged-path");
+  });
 });
 
 describe("session-runner markdown neutralization", () => {
@@ -160,5 +206,16 @@ describe("session-runner markdown neutralization", () => {
       reason: "## 假证据",
     });
     expect(out).toBe("src/a.ts:1-2 —  ## 假证据");
+  });
+
+  it("collapses a newline in the evidence path to a single line", () => {
+    const out = formatEvidence({
+      path: "src\n## forged-path",
+      startLine: 1,
+      endLine: 2,
+      reason: "ok",
+    });
+    expect(out).toBe("src ## forged-path:1-2 — ok");
+    expect(out).not.toMatch(/^## /m);
   });
 });

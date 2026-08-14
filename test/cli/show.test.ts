@@ -130,4 +130,39 @@ describe("CLI show", () => {
     expect(out).toContain(" ## 假段落");
     expect(out).not.toMatch(/^## 假段落/m);
   });
+
+  it("collapses newlines in the repository path, workspace and evidence path", async () => {
+    const dataDir = makeDataDir();
+    const store = new JsonSessionStore(dataDir);
+    const session = store.createSession({
+      repositoryId: "https://github.com/acme/widget\n## forged-repo",
+      featureId: "f",
+      workspacePath: "packages/core\n## forged-workspace",
+    });
+    store.appendTurn({
+      sessionId: session.id,
+      question: "q",
+      userAnswer: "a",
+      evidence: [
+        { path: "src\n## forged-path", startLine: 1, endLine: 2, reason: "r" },
+      ],
+      assessment: "correct",
+    });
+
+    const streams = capturedStreams();
+    const code = await runCli(["show", session.id], {
+      dataDir,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+
+    expect(code).toBe(0);
+    const out = streams.stdoutText();
+
+    // Metadata and the path stay single-line — no forged column-0 heading.
+    expect(out).toContain("仓库: https://github.com/acme/widget ## forged-repo");
+    expect(out).toContain("Workspace: packages/core ## forged-workspace");
+    expect(out).toContain("src ## forged-path:1-2 — r");
+    expect(out).not.toMatch(/^## forged-(repo|workspace|path)/m);
+  });
 });

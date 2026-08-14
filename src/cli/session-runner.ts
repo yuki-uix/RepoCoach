@@ -14,7 +14,7 @@ import type { AgentDecision, Evidence } from "../domain/index.js";
 import type { AgentLoopEvent } from "../agent/index.js";
 import { Orchestrator, type StepResult } from "../orchestrator/orchestrator.js";
 import type { SessionStore } from "../store/index.js";
-import { bold, dim, neutralizeMarkdown } from "./markdown.js";
+import { bold, dim, neutralizeMarkdown, renderInline } from "./markdown.js";
 
 /** Reads one line of user input (the readline `question` seam). */
 export type PromptFn = (query: string) => Promise<string>;
@@ -49,7 +49,9 @@ class EventSink {
   push(event: AgentLoopEvent): void {
     switch (event.type) {
       case "tool_call_started":
-        this.stderr.write(dim(`→ ${event.name}${formatToolArgs(event.name, event.arguments)}`) + "\n");
+        this.stderr.write(
+          dim(`→ ${renderInline(event.name)}${formatToolArgs(event.name, event.arguments)}`) + "\n",
+        );
         break;
       case "tool_result":
         this.stderr.write(dim(`  ${summarize(event.result)}`) + "\n");
@@ -124,7 +126,7 @@ export class SessionRunner {
 
     const onSigint = (): void => {
       this.deps.stderr.write(
-        `\nSession saved. 可用 repocoach resume ${this.deps.sessionId} 恢复\n`,
+        `\nSession saved. 可用 repocoach resume ${renderInline(this.deps.sessionId)} 恢复\n`,
       );
       process.exit(130);
     };
@@ -219,7 +221,7 @@ export function renderQuestion(question: string): string {
 }
 
 export function formatEvidence(evidence: Evidence): string {
-  return `${evidence.path}:${evidence.startLine}-${evidence.endLine} — ${neutralizeMarkdown(evidence.reason)}`;
+  return `${renderInline(evidence.path)}:${renderInline(evidence.startLine)}-${renderInline(evidence.endLine)} — ${neutralizeMarkdown(evidence.reason)}`;
 }
 
 /** `repo_search(pattern=...)` — primitive args rendered as `key=value`. */
@@ -238,7 +240,7 @@ function formatToolArgs(name: string, argumentsJson: string): string {
   }
   const parts = Object.entries(args as Record<string, unknown>).map(([key, value]) => {
     const rendered = typeof value === "string" ? value : JSON.stringify(value);
-    return `${key}=${truncate(rendered, ARG_VALUE_WIDTH)}`;
+    return `${renderInline(key)}=${truncate(renderInline(rendered), ARG_VALUE_WIDTH)}`;
   });
   return parts.length === 0 ? "" : `(${parts.join(", ")})`;
 }
