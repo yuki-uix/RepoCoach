@@ -152,12 +152,16 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
         ledger,
         onEvent,
       });
+      // A resumed session carries its cumulative token usage; pass it through so
+      // the budget limit keeps counting across interrupts instead of resetting.
+      const session = store.getSession(sessionId);
       return {
         orchestrator: new Orchestrator({
           agent: toInvoker(loop),
           store,
           sessionId,
           featureGoal,
+          initialUsage: session?.usage,
         }),
         loop,
       };

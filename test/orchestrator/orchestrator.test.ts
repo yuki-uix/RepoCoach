@@ -325,4 +325,41 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
 
     await expect(orchestrator.step()).rejects.toThrow(/terminal phase/);
   });
+
+  it("seeds usage from initialUsage and persists the running total", async () => {
+    const { agent } = stubAgent((input) => {
+      if (input.phase === "orientation") {
+        return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+      }
+      return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+    });
+
+    const session = store.createSession({
+      repositoryId: "repo-1",
+      featureId: "feature-1",
+    });
+    const orchestrator = new Orchestrator({
+      agent,
+      store,
+      sessionId: session.id,
+      featureGoal: "goal",
+      initialUsage: { inputTokens: 100, outputTokens: 50 },
+    });
+
+    expect(orchestrator.accumulatedUsage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+
+    await orchestrator.step(); // orientation → hypothesis
+
+    expect(orchestrator.accumulatedUsage).toEqual({
+      inputTokens: 110,
+      outputTokens: 55,
+    });
+    expect(store.getSession(session.id)?.usage).toEqual({
+      inputTokens: 110,
+      outputTokens: 55,
+    });
+  });
 });

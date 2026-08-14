@@ -73,6 +73,12 @@ export type FeatureCandidate = z.infer<typeof featureCandidateSchema>;
 export const sessionStatusSchema = z.enum(["active", "completed", "abandoned"]);
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 
+export const tokenUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+});
+export type TokenUsage = z.infer<typeof tokenUsageSchema>;
+
 export const learningSessionSchema = z.object({
   id: z.string(),
   repositoryId: z.string(),
@@ -81,6 +87,12 @@ export const learningSessionSchema = z.object({
   /** Number of questions asked so far (prediction + follow-ups). */
   turnCount: z.number().int().nonnegative(),
   status: sessionStatusSchema,
+  /**
+   * Cumulative token usage across every agent call so far. Persisted so an
+   * interrupted session resumes its budget accounting instead of resetting it.
+   * Optional for backward compatibility with pre-usage session files.
+   */
+  usage: tokenUsageSchema.optional(),
   /** ISO 8601 timestamp the session was created. */
   createdAt: z.iso.datetime().optional(),
   /** ISO 8601 timestamp of the last mutation (turn appended or phase change). */
@@ -133,12 +145,6 @@ export const agentDecisionSchema = z
     }
   });
 export type AgentDecision = z.infer<typeof agentDecisionSchema>;
-
-export const tokenUsageSchema = z.object({
-  inputTokens: z.number().int().nonnegative(),
-  outputTokens: z.number().int().nonnegative(),
-});
-export type TokenUsage = z.infer<typeof tokenUsageSchema>;
 
 export const tokenBudgetSchema = z.object({
   maxInputTokens: z.number().int().positive(),

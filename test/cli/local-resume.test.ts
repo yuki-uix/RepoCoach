@@ -46,6 +46,51 @@ function crashingProvider(): ChatProvider {
   };
 }
 
+describe("CLI start analyses a pinned clone from the first import (P1)", () => {
+  it("reads the original commit, not a later working-tree edit, before the first model read", async () => {
+    const repo = await createTempRepo({ "a.txt": "original\n" });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+    const dataDir = makeDataDir();
+
+    const reader = recordingReader(createReader({ cacheRoot }));
+
+    // Mutate the working tree right before the first model read (the import has
+    // already happened during `start`), then crash so the session stays active.
+    let firstCall = true;
+    const provider: ChatProvider = {
+      async complete() {
+        if (firstCall) {
+          firstCall = false;
+          writeFiles(repo.dir, { "a.txt": "modified\n" });
+        }
+        throw new Error("connection dropped (simulated crash)");
+      },
+    };
+
+    const streams = capturedStreams();
+    streams.stdin.write("1\n");
+    const code = await runCli(["start", repo.dir], {
+      dataDir,
+      reader,
+      provider,
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    streams.stdin.end();
+    expect(code).toBe(1);
+
+    const firstImport = reader.imports[0];
+    expect(firstImport?.sha).toBe(repo.sha);
+    // The first analysis runs against a pinned clone, not the working tree, so
+    // the post-import edit must not leak into the analysed content.
+    expect(firstImport?.rootDir).not.toBe(repo.dir);
+    expect(readFileSlice(firstImport!.rootDir, "a.txt").content).toBe("original");
+  });
+});
+
 describe("CLI resume pins a local git-root path to its SHA (P1)", () => {
   it("resumes the commit a local git-root session started from, not the moved HEAD", async () => {
     // Start from one commit, then append a second that overwrites a.txt.

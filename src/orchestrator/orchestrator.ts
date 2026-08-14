@@ -59,6 +59,12 @@ export interface OrchestratorOptions {
   /** Max questions per session (default 5). */
   maxTurns?: number;
   budget?: TokenBudget;
+  /**
+   * Token usage already accumulated before this Orchestrator was built — a
+   * resumed session passes its persisted usage so the budget limit keeps
+   * counting across interruptions instead of resetting.
+   */
+  initialUsage?: TokenUsage;
 }
 
 const DEFAULT_MAX_TURNS = 5;
@@ -87,7 +93,7 @@ export class Orchestrator {
   private readonly featureGoal: string;
   private readonly maxTurns: number;
   private readonly budget: TokenBudget;
-  private readonly usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+  private readonly usage: TokenUsage;
 
   constructor(options: OrchestratorOptions) {
     this.agent = options.agent;
@@ -96,6 +102,9 @@ export class Orchestrator {
     this.featureGoal = options.featureGoal;
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
     this.budget = options.budget ?? DEFAULT_BUDGET;
+    this.usage = options.initialUsage
+      ? { ...options.initialUsage }
+      : { inputTokens: 0, outputTokens: 0 };
   }
 
   /** Cumulative token usage across every agent call in this session. */
@@ -129,6 +138,7 @@ export class Orchestrator {
       this.store.updateSession(this.sessionId, {
         phase: "error",
         status: "abandoned",
+        usage: this.accumulatedUsage,
       });
       return {
         phase: "error",
@@ -167,6 +177,7 @@ export class Orchestrator {
       phase: nextPhase,
       turnCount,
       status: terminalStatus(nextPhase) ?? session.status,
+      usage: this.accumulatedUsage,
     });
 
     return {

@@ -87,18 +87,25 @@ export async function cloneRepo(
   const git = opts.git ?? runGit;
 
   if (source.kind === "local") {
-    // Local paths are used directly (fixtures / eval) — no clone, no cache.
-    // Two distinct moments use this branch:
-    //   - recording (opts.ref undefined): decide whether the working tree can be
-    //     faithfully reproduced from a SHA. `headSha` returns "" for a
-    //     subdirectory, a non-git path, or a dirty tree (including readable
-    //     ignored files), all of which keep working-tree semantics (no pin).
+    // Local paths are used directly (fixtures / eval) — no clone, no cache,
+    // except when the tree can be pinned to a SHA. Recording and consumption
+    // are symmetric: both read the same immutable clone whenever a SHA exists.
+    //   - recording (opts.ref undefined): `headSha` resolves a SHA only for a
+    //     clean git repo root (no staged/modified/untracked files, no readable
+    //     ignored files). When it does, the first analysis reads that pinned
+    //     clone — a later working-tree edit can no longer change what the
+    //     session analyses. When it returns "" (subdirectory, non-git path,
+    //     dirty tree, readable ignored files), we keep working-tree semantics
+    //     with no pin (the honest degradation is unchanged).
     //   - consumption (opts.ref set): a resume must import the saved SHA, so we
     //     clone-and-checkout it. The only precondition is that the path is a git
     //     repo root; a tree that became dirty after the session was recorded
     //     must NOT silently fall back to the working tree.
     if (opts.ref === undefined) {
-      return { rootDir: source.path, sha: await headSha(source.path, git) };
+      const sha = await headSha(source.path, git);
+      return sha === ""
+        ? { rootDir: source.path, sha }
+        : cloneLocalAtRef(source.path, sha, opts.cacheRoot, git);
     }
     if (!(await isGitRoot(source.path, git))) {
       throw new Error(

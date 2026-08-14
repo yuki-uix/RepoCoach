@@ -76,7 +76,7 @@ describe("cloneRepo", () => {
     expect(rootDir).toBe(join(cacheRoot, "o", "n", sha));
   });
 
-  it("uses a local path directly without cloning", async () => {
+  it("clones a clean local git root on first import so analysis reads a pinned copy", async () => {
     const repo = await createTempRepo({ "a.txt": "hello\n" });
     tempDirs.push(repo.dir);
     const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
@@ -86,8 +86,26 @@ describe("cloneRepo", () => {
       { kind: "local", path: repo.dir },
       { cacheRoot },
     );
-    expect(rootDir).toBe(repo.dir);
     expect(sha).toBe(repo.sha);
+    // Recording now reads the pinned clone, not the mutable working tree.
+    expect(rootDir).not.toBe(repo.dir);
+    expect(readFileSlice(rootDir, "a.txt").content).toBe("hello");
+  });
+
+  it("uses a subdirectory of a git repo directly without cloning", async () => {
+    const repo = await createTempRepo({ "sub/a.txt": "hello\n" });
+    tempDirs.push(repo.dir);
+    const cacheRoot = mkdtempSync(join(tmpdir(), "repocoach-cache-"));
+    tempDirs.push(cacheRoot);
+
+    const subdir = join(repo.dir, "sub");
+    const { rootDir, sha } = await cloneRepo(
+      { kind: "local", path: subdir },
+      { cacheRoot },
+    );
+    // A subdirectory has no reproducible pin, so it keeps working-tree semantics.
+    expect(rootDir).toBe(subdir);
+    expect(sha).toBe("");
   });
 
   it("rejects a ref that looks like a git option before invoking git", async () => {
@@ -174,7 +192,7 @@ describe("cloneRepo", () => {
       { kind: "local", path: repo.dir },
       { cacheRoot },
     );
-    expect(rootDir).toBe(repo.dir);
+    expect(rootDir).not.toBe(repo.dir);
     expect(sha).toBe(repo.sha);
   });
 
