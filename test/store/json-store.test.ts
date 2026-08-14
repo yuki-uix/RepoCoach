@@ -15,6 +15,7 @@ import type {
   TokenUsage,
 } from "../../src/domain";
 import {
+  DEFAULT_BUDGET,
   Orchestrator,
   type AgentInvocation,
   type AgentInvoker,
@@ -347,7 +348,7 @@ describe("session resume persists token usage across interruption (P1)", () => {
         if (spendBig) {
           return {
             decision: decision({ question: "follow-up", nextAction: "ask" }),
-            usage: { inputTokens: 300_000, outputTokens: 0 },
+            usage: { inputTokens: DEFAULT_BUDGET.maxInputTokens + 1, outputTokens: 0 },
           };
         }
         return happyPath(input);
@@ -359,7 +360,7 @@ describe("session resume persists token usage across interruption (P1)", () => {
     });
     expect(orchestrator.accumulatedUsage).toEqual(expectedUsage);
 
-    // The next call spends enough to push the cumulative total over the 200k
+    // The next call spends enough to push the cumulative total over the default
     // input-token budget, so the budget stop forces recap across the resume.
     spendBig = true;
     const result = await orchestrator.step();

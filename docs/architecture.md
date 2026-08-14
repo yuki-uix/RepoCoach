@@ -97,7 +97,7 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 
 - 状态转换（`phase` 由应用层持有并作为入参传给 Agent，模型不决定阶段）；
 - 当前功能和学习目标；
-- 最大轮数（默认 5）和 Token 预算（初始值：单 Session 上限 200k input / 20k output tokens，随 eval 调整）；
+- 最大轮数（默认 5）和 Token 预算（默认值：单 Session 上限 250k input / 40k output tokens，真模型实测后设定，见 issue #23）；
 - 调用 Agent；
 - 保存每一轮结果。
 

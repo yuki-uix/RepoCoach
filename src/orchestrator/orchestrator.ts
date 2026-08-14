@@ -69,9 +69,16 @@ export interface OrchestratorOptions {
 }
 
 const DEFAULT_MAX_TURNS = 5;
-const DEFAULT_BUDGET: TokenBudget = {
-  maxInputTokens: 200_000,
-  maxOutputTokens: 20_000,
+/**
+ * Default per-session token budget. The values are measured from real-model
+ * smoke runs (issue #23): one full 4-question session used ~122k input / ~21k
+ * output tokens (it converged early after hitting the old 20k output cap), and
+ * the full 5-question run projects to ~150k / ~26k; these limits leave headroom
+ * above both.
+ */
+export const DEFAULT_BUDGET: TokenBudget = {
+  maxInputTokens: 250_000,
+  maxOutputTokens: 40_000,
 };
 const MAX_DECISION_RETRIES = 2;
 
@@ -318,9 +325,10 @@ function resolveStep(
       if (input.userAnswer !== undefined) {
         return advance(phase, { type: "user_answered" });
       }
-      // No answer yet: the prediction question only counts when the agent
-      // actually asks (nextAction 'ask'); an overruled suggestion is not a turn.
-      return { phase, askedQuestion: nextAction === "ask", overridden: nextAction !== "ask" };
+      // No answer yet: the session stays in hypothesis. A non-empty question
+      // in the decision is posed to the user (whatever the nextAction) and so
+      // counts as a turn; a question-less suggestion is overruled and does not.
+      return { phase, askedQuestion: hasQuestion(decision), overridden: nextAction !== "ask" };
     }
 
     case "trace": {
@@ -359,7 +367,7 @@ function resolveStep(
           overridden: true,
         };
       }
-      return { phase, askedQuestion: nextAction === "ask", overridden: nextAction !== "ask" };
+      return { phase, askedQuestion: hasQuestion(decision), overridden: nextAction !== "ask" };
     }
 
     case "feedback":
@@ -371,14 +379,15 @@ function resolveStep(
           overridden: true,
         };
       }
-      // Probing deeper with nextAction 'ask' poses a fresh question immediately
-      // (the runner shows it right after this transition), so it must count
-      // toward the turn limit. Any other non-finish suggestion is overruled.
+      // Probing deeper poses a fresh question immediately after this transition
+      // (the runner shows it right away), so any non-empty question must count
+      // toward the turn limit — regardless of the nextAction. A question-less
+      // non-finish suggestion is overruled.
       return nextAction === "finish"
         ? advance(phase, { type: "chain_complete" })
         : {
             phase: transition(phase, { type: "continue_probing" }),
-            askedQuestion: nextAction === "ask",
+            askedQuestion: hasQuestion(decision),
             overridden: nextAction !== "ask",
           };
 
@@ -386,6 +395,11 @@ function resolveStep(
       // recap / error are terminal; run() guards against them.
       throw new Error(`Unexpected phase "${phase}"`);
   }
+}
+
+/** True when a decision carries a non-empty question to pose to the user. */
+function hasQuestion(decision: AgentDecision): boolean {
+  return decision.question !== undefined && decision.question.trim() !== "";
 }
 
 function advance(phase: Phase, event: OrchestratorEvent): ResolveResult {
