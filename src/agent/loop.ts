@@ -401,16 +401,22 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   }
   // Cap the summary: keep the most recent turns in full and collapse the older
   // ones into a single marker so a long session stops re-sending every word.
+  // Reserve the marker's maximum length up front (its digit count grows with
+  // `omitted`, so it can never exceed the marker for `turns.length`); without
+  // that reservation the marker pushes the joined string over the cap.
+  const maxOlderBytes = byteLength(`… ${turns.length} earlier turn(s) omitted (see session file)\n`);
+  const budget = MAX_HISTORY_SUMMARY_BYTES - byteLength(prefix) - maxOlderBytes;
   const kept: string[] = [];
-  let keptBytes = byteLength(prefix);
+  let keptBytes = 0;
   let index = turns.length - 1;
   while (index >= 0) {
     const line = formatTurnLine(turns[index]!, index);
-    if (byteLength(line) + 1 + keptBytes > MAX_HISTORY_SUMMARY_BYTES) {
+    const separator = kept.length === 0 ? 0 : 1;
+    if (byteLength(line) + separator + keptBytes > budget) {
       break;
     }
     kept.unshift(line);
-    keptBytes += byteLength(line) + 1;
+    keptBytes += byteLength(line) + separator;
     index -= 1;
   }
   const omitted = index + 1;

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
   createToolRegistry,
   type Evidence,
   type EvidenceValidator,
@@ -327,5 +329,100 @@ describe("repo_read_file truncation", () => {
     // The recorded range stops where the truncation cut the content, so a
     // claim spanning the whole (unshown) file is not grounded.
     expect(ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 5_000, reason: "" })).toBe(false);
+  });
+});
+
+describe("repo_search truncation", () => {
+  it("caps the first oversized match and does not ground truncated context lines", async () => {
+    // A match on the first line with a huge context pulls in ~300 lines, so the
+    // very first match already exceeds the per-result cap.
+    const lines = Array.from({ length: 300 }, (_, i) =>
+      i === 0 ? `NEEDLE ${"x".repeat(60)}` : `line ${i} ${"x".repeat(60)}`,
+    );
+    const { reader, repo } = makeTempReader({ "src/big.ts": lines.join("\n") + "\n" });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "NEEDLE", contextLines: 300 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // The match line itself is shown and citable.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(true);
+    // A context line past the truncation point was never returned, so citing it
+    // is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 300, endLine: 300, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("drops a single oversized context line without recording it", async () => {
+    const { reader, repo } = makeTempReader({
+      "src/big.ts": "NEEDLE short\n" + "x".repeat(20_000) + "\n",
+    });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "NEEDLE", contextLines: 1 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // The oversized context line (line 2) is dropped whole, so it is not citable.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 2, endLine: 2, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("byte-caps a single oversized match line and leaves it uncitable", async () => {
+    // A single source line that is itself a giant match makes the header line
+    // alone exceed the cap; it is byte-truncated and not recorded.
+    const { reader, repo } = makeTempReader({ "src/big.ts": "x".repeat(20_000) + "\n" });
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_search",
+      args: { pattern: "x+", contextLines: 0 },
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("结果已截断");
+    // Only part of the match line is visible, so citing it is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(false);
+  });
+});
+
+describe("repo_get_package_info truncation", () => {
+  it("caps a package.json with hundreds of dependencies and adds a note", async () => {
+    const dependencies: Record<string, string> = {};
+    for (let i = 0; i < 600; i++) {
+      dependencies[`dependency-${i}`] = "^1.0.0";
+    }
+    const { reader, repo } = makeTempReader({
+      "package.json": JSON.stringify({ name: "big", dependencies }),
+    });
+    const registry = createToolRegistry({ reader, repo });
+
+    const result = await registry.execute({
+      name: "repo_get_package_info",
+      args: {},
+      collectedEvidence: [],
+    });
+
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(result).toContain("内容已截断");
   });
 });

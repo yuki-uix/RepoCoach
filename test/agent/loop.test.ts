@@ -467,4 +467,22 @@ describe("AgentLoop", () => {
     expect(byteLength(summary!)).toBeLessThanOrEqual(MAX_HISTORY_SUMMARY_BYTES);
     expect(summary).toContain("omitted");
   });
+
+  it("reserves room for the omission marker so the summary never exceeds the cap", () => {
+    // Short per-turn lines land the pre-marker budget within a few bytes of the
+    // cap, so the older-turn marker used to push the joined string over it.
+    const turns: LearningTurn[] = Array.from({ length: 120 }, () => ({
+      sessionId: "s1",
+      question: "q",
+      userAnswer: "a",
+      evidence: [],
+      feedback: "f".repeat(10),
+    }));
+
+    const summary = summarizeTurnHistory(turns);
+
+    expect(summary).not.toBeNull();
+    expect(summary).toContain("omitted");
+    expect(byteLength(summary!)).toBeLessThanOrEqual(MAX_HISTORY_SUMMARY_BYTES);
+  });
 });
