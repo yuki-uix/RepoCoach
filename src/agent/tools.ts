@@ -9,16 +9,19 @@
  * constructive grounding) and appends accepted claims to the turn's list.
  *
  * Byte-cap coverage (§6 "同一道闸覆盖所有出口"): every string an executor
- * returns to the model is bounded by MAX_TOOL_RESULT_BYTES.
+ * returns to the model is bounded by the execution's `maxBytes` budget (which
+ * the loop derives by reserving the data-guard wrapper overhead off
+ * MAX_TOOL_RESULT_BYTES) *after* the wrapper escapes it — each site bills the
+ * escaped size so a marker-stuffed file cannot inflate past the cap.
  *
- * - repo_get_tree   → truncateBytes over the file listing (+ note when cut)
- * - repo_search     → per-match whole-line truncation (+ note), recorder only
- *                     sees the lines actually shown
- * - repo_read_file  → fitSourceLines over the numbered content, with header and
- *                     truncation-note bytes reserved up front (+ note)
- * - repo_get_package_info → truncateBytes over the JSON summary (+ note)
- * - repo_save_evidence → truncateBytes over the receipt / rejection string
- * - the outer catch → truncateBytes over `Error: <message>`; the small
+ * - repo_get_tree   → truncateEscapedBytes over the file listing (+ note when cut)
+ * - repo_search     → per-match whole-line escaped truncation (+ note), recorder
+ *                     only sees the lines actually shown
+ * - repo_read_file  → fitSourceLines (escaped measure) over the numbered content,
+ *                     with escaped header and note bytes reserved up front (+ note)
+ * - repo_get_package_info → truncateEscapedBytes over the JSON summary (+ note)
+ * - repo_save_evidence → truncateEscapedBytes over the receipt / rejection string
+ * - the outer catch → truncateEscapedBytes over `Error: <message>`; the small
  *                     schema-error / unknown-tool strings are constant-bounded
  */
 
@@ -31,9 +34,10 @@ import {
   byteLength,
   fitSourceLines,
   lineNumberPrefix,
-  truncateBytes,
 } from "./limits.js";
+import { escapedByteLength, truncateEscapedBytes } from "./data-guard.js";
 import type { ToolDefinition } from "./provider.js";
+import type { SessionReadCache } from "./read-cache.js";
 
 export interface EvidenceValidator {
   validate(evidence: Evidence): { ok: true } | { ok: false; reason: string };
@@ -57,6 +61,8 @@ export interface ReturnRecorder {
   record(path: string, startLine: number, endLine: number): void;
   /** True when this exact (path, inclusive line range) was already returned this turn. */
   hasRead?(path: string, startLine: number, endLine: number): boolean;
+  /** True when this exact range was carried into the current turn's context. */
+  hasCarried?(path: string, startLine: number, endLine: number): boolean;
 }
 
 export interface ToolRuntime {
@@ -64,6 +70,14 @@ export interface ToolRuntime {
   repo: Repository;
   evidenceValidator?: EvidenceValidator;
   returnRecorder?: ReturnRecorder;
+  /** Session-level record of shown file ranges, carried across turns (issue #25). */
+  readCache?: SessionReadCache;
+  /**
+   * Measurement hook: called with the shown (path, line range) whenever
+   * repo_read_file actually returns content (never for the already-carried /
+   * already-read shortcuts). The loop uses it to emit `read_file_content`.
+   */
+  onContentRead?: (path: string, startLine: number, endLine: number) => void;
 }
 
 export interface ToolExecution {
@@ -72,6 +86,14 @@ export interface ToolExecution {
   args: unknown;
   /** This turn's collected evidence list — repo_save_evidence appends here. */
   collectedEvidence: Evidence[];
+  /**
+   * Byte budget for the *payload* this execution may return. The loop reserves
+   * the data-guard wrapper overhead off MAX_TOOL_RESULT_BYTES and passes the
+   * remainder here, so the wrapped tool message stays within the overall cap.
+   * Defaults to MAX_TOOL_RESULT_BYTES when absent (direct callers that do not
+   * wrap their result).
+   */
+  maxBytes?: number;
 }
 
 export interface ToolRegistry {
@@ -176,11 +198,12 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
   const validator = runtime.evidenceValidator ?? acceptAllEvidence;
 
   async function execute(execution: ToolExecution): Promise<string> {
+    const cap = execution.maxBytes ?? MAX_TOOL_RESULT_BYTES;
     try {
-      return await executeTool(runtime, validator, execution);
+      return await executeTool(runtime, validator, execution, cap);
     } catch (error) {
       const message = `Error: ${error instanceof Error ? error.message : String(error)}`;
-      return truncateBytes(message, MAX_TOOL_RESULT_BYTES).text;
+      return truncateEscapedBytes(message, cap).text;
     }
   }
 
@@ -200,6 +223,7 @@ function executeTool(
   runtime: ToolRuntime,
   validator: EvidenceValidator,
   execution: ToolExecution,
+  cap: number,
 ): string | Promise<string> {
   switch (execution.name) {
     case "repo_get_tree": {
@@ -208,11 +232,11 @@ function executeTool(
         return "(no readable files)";
       }
       const listing = entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
-      if (byteLength(listing) <= MAX_TOOL_RESULT_BYTES) {
+      if (escapedByteLength(listing) <= cap) {
         return listing;
       }
       const note = `\n(结果已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用 repo_search 定位具体文件)`;
-      const capped = truncateBytes(listing, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      const capped = truncateEscapedBytes(listing, cap - byteLength(note));
       return `${capped.text}${note}`;
     }
 
@@ -221,7 +245,7 @@ function executeTool(
       if (!parsed.success) {
         return `Error: ${formatZodError(parsed.error)}`;
       }
-      return search(runtime, parsed.data);
+      return search(runtime, parsed.data, cap);
     }
 
     case "repo_read_file": {
@@ -229,17 +253,17 @@ function executeTool(
       if (!parsed.success) {
         return `Error: ${formatZodError(parsed.error)}`;
       }
-      return readFile(runtime, parsed.data);
+      return readFile(runtime, parsed.data, cap);
     }
 
     case "repo_get_package_info": {
       const info = runtime.reader.getPackageInfo(runtime.repo);
       const text = JSON.stringify(info, null, 2);
-      if (byteLength(text) <= MAX_TOOL_RESULT_BYTES) {
+      if (escapedByteLength(text) <= cap) {
         return text;
       }
       const note = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，脚本 ${info.scripts.length} 个、依赖 ${info.dependencies.length} 个)`;
-      const capped = truncateBytes(text, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      const capped = truncateEscapedBytes(text, cap - byteLength(note));
       return `${capped.text}${note}`;
     }
 
@@ -250,16 +274,16 @@ function executeTool(
       }
       const verdict = validator.validate(parsed.data);
       if (!verdict.ok) {
-        return truncateBytes(
+        return truncateEscapedBytes(
           `Error: evidence rejected: ${verdict.reason}`,
-          MAX_TOOL_RESULT_BYTES,
+          cap,
         ).text;
       }
       execution.collectedEvidence.push(parsed.data);
       const evidence = parsed.data;
-      return truncateBytes(
+      return truncateEscapedBytes(
         `Saved evidence: ${evidence.path} lines ${evidence.startLine}-${evidence.endLine} (${evidence.reason})`,
-        MAX_TOOL_RESULT_BYTES,
+        cap,
       ).text;
     }
 
@@ -271,6 +295,7 @@ function executeTool(
 async function search(
   runtime: ToolRuntime,
   args: { pattern: string; contextLines?: number },
+  cap: number,
 ): Promise<string> {
   const matches = await runtime.reader.search(
     runtime.repo,
@@ -285,7 +310,7 @@ async function search(
   // see. The note that signals truncation consumes bytes too, so it is reserved
   // up front — every match (including the first) is cut to whole display lines.
   const note = "\n\n(结果已截断：更多匹配未显示，可用更窄的 pattern 或更小的 contextLines 重搜)";
-  const contentBudget = MAX_TOOL_RESULT_BYTES - byteLength(note);
+  const contentBudget = cap - byteLength(note);
   const parts: string[] = [];
   let usedBytes = 0;
 
@@ -294,9 +319,9 @@ async function search(
     const sepBytes = byteLength(sep);
     const wholeText = formatSearchMatch(match);
 
-    if (usedBytes + sepBytes + byteLength(wholeText) <= contentBudget) {
+    if (usedBytes + sepBytes + escapedByteLength(wholeText) <= contentBudget) {
       parts.push(sep + wholeText);
-      usedBytes += sepBytes + byteLength(wholeText);
+      usedBytes += sepBytes + escapedByteLength(wholeText);
       runtime.returnRecorder?.record(
         match.path,
         match.line - match.contextBefore.length,
@@ -371,18 +396,18 @@ function truncateMatchLines(
   maxBytes: number,
 ): { text: string; range: { startLine: number; endLine: number } | null } {
   const first = lines[0]!;
-  if (byteLength(first.text) > maxBytes) {
-    return { text: truncateBytes(first.text, maxBytes).text, range: null };
+  if (escapedByteLength(first.text) > maxBytes) {
+    return { text: truncateEscapedBytes(first.text, maxBytes).text, range: null };
   }
   const kept: SearchDisplayLine[] = [first];
-  let bytes = byteLength(first.text);
+  let bytes = escapedByteLength(first.text);
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]!;
-    if (bytes + 1 + byteLength(line.text) > maxBytes) {
+    if (bytes + 1 + escapedByteLength(line.text) > maxBytes) {
       break;
     }
     kept.push(line);
-    bytes += 1 + byteLength(line.text);
+    bytes += 1 + escapedByteLength(line.text);
   }
   const startLine = Math.min(...kept.map((line) => line.sourceLine));
   const endLine = Math.max(...kept.map((line) => line.sourceLine));
@@ -395,6 +420,7 @@ function truncateMatchLines(
 function readFile(
   runtime: ToolRuntime,
   args: { path: string; startLine?: number; endLine?: number },
+  cap: number,
 ): string {
   const slice = runtime.reader.readFile(
     runtime.repo,
@@ -402,6 +428,11 @@ function readFile(
     args.startLine,
     args.endLine,
   );
+  // The range is already carried into this turn's context (cross-turn cache):
+  // point at it instead of re-sending the full text (issue #25, token waste).
+  if (runtime.returnRecorder?.hasCarried?.(args.path, slice.startLine, slice.endLine)) {
+    return `${args.path} (lines ${slice.startLine}-${slice.endLine}) 本轮上下文中已携带，见上文，无需重读。`;
+  }
   // Same-turn re-read of the exact range: point at the earlier result instead
   // of re-sending the full text (issue #23, token waste).
   if (runtime.returnRecorder?.hasRead?.(args.path, slice.startLine, slice.endLine)) {
@@ -419,25 +450,30 @@ function readFile(
   // the longer one is reserved and the final string can never exceed the cap.
   const noteTruncated = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用更小的行号范围重读剩余部分)`;
   const noteUncitable = `\n(内容已截断：首行即超过 ${MAX_TOOL_RESULT_BYTES} 字节，未完整显示任何一行，此行不可引用)`;
+  // The header carries the repo path and the lines are file content — both are
+  // escaped by wrapRepoData, so reserve their escaped sizes or a marker-laden
+  // path/content would inflate the result past the cap after wrapping.
   const reservedBytes =
-    byteLength(header) +
+    escapedByteLength(header) +
     byteLength("\n") +
     Math.max(byteLength(noteTruncated), byteLength(noteUncitable));
   const fit = fitSourceLines(
     slice.content,
-    MAX_TOOL_RESULT_BYTES - reservedBytes,
+    cap - reservedBytes,
     slice.startLine,
+    escapedByteLength,
+    truncateEscapedBytes,
   );
-  // Record only whole lines actually shown — a byte-truncated first line (or a
-  // truncated tail) must not be citable.
-  if (fit.keptLines > 0) {
-    runtime.returnRecorder?.record(
-      args.path,
-      slice.startLine,
-      slice.startLine + fit.keptLines - 1,
-    );
-  }
   const numbered = numberLines(fit.content, slice.startLine);
+  // Record only whole lines actually shown — a byte-truncated first line (or a
+  // truncated tail) must not be citable. The session read cache mirrors the
+  // same shown range, so only exactly what the model saw can be carried later.
+  if (fit.keptLines > 0) {
+    const endLine = slice.startLine + fit.keptLines - 1;
+    runtime.returnRecorder?.record(args.path, slice.startLine, endLine);
+    runtime.readCache?.record(args.path, slice.startLine, endLine, numbered);
+    runtime.onContentRead?.(args.path, slice.startLine, endLine);
+  }
   if (!fit.truncated) {
     return `${header}\n${numbered}`;
   }

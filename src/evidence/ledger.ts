@@ -1,6 +1,7 @@
 /**
  * Tool return ledger — the server-side record of every (path, line range) the
- * read/search tools actually returned this turn.
+ * read/search tools actually returned this turn, plus the ranges carried into
+ * this turn's context from earlier turns (the cross-turn read cache).
  *
  * Evidence grounding checks a claim against this record: a claim is grounded
  * only when its full range sits inside a single recorded range for the same
@@ -17,15 +18,33 @@ interface RecordedRange {
 }
 
 /**
- * Per-turn record of tool returns. Cleared at the start of every agent turn so
- * "grounded" always means "returned this turn".
+ * Per-turn record of what the model can cite. Cleared at the start of every
+ * agent turn so "grounded" always means "seen this turn" — either returned by a
+ * tool this turn, or carried into this turn's context with its content.
  */
 export class ToolReturnLedger {
+  /** Ranges the read/search tools actually returned this turn. */
   private ranges: RecordedRange[] = [];
+  /** Ranges carried into this turn's context (from the session read cache). */
+  private carried: RecordedRange[] = [];
 
   /** Record a (path, inclusive line range) the tools actually returned. */
   record(path: string, startLine: number, endLine: number): void {
     this.ranges.push({
+      path: normalizePath(path),
+      startLine,
+      endLine,
+    });
+  }
+
+  /**
+   * Record a range whose content was actually carried into this turn's context.
+   * Only the loop calls this, for exactly the ranges it re-injected with their
+   * content — never the whole cache, and never a downgraded (content-omitted)
+   * range, which the model cannot cite without re-reading.
+   */
+  recordCarried(path: string, startLine: number, endLine: number): void {
+    this.carried.push({
       path: normalizePath(path),
       startLine,
       endLine,
@@ -48,23 +67,39 @@ export class ToolReturnLedger {
   }
 
   /**
+   * True when this exact range was carried into the current turn's context. The
+   * read tool uses this to point the model at the already-carried content
+   * instead of re-sending it (issue #25).
+   */
+  hasCarried(path: string, startLine: number, endLine: number): boolean {
+    const normalized = normalizePath(path);
+    return this.carried.some(
+      (range) =>
+        range.path === normalized &&
+        range.startLine === startLine &&
+        range.endLine === endLine,
+    );
+  }
+
+  /**
    * True when `claim`'s (path, [startLine, endLine]) is fully contained in one
-   * recorded range for the same path. A claim spanning two records is rejected
-   * even when the records are adjacent (no range merging).
+   * recorded range for the same path — either a tool return this turn or a
+   * range carried into this turn's context. A claim spanning two records is
+   * rejected even when the records are adjacent (no range merging).
    */
   isGrounded(claim: Evidence): boolean {
     const path = normalizePath(claim.path);
-    return this.ranges.some(
-      (range) =>
-        range.path === path &&
-        range.startLine <= claim.startLine &&
-        claim.endLine <= range.endLine,
-    );
+    const contained = (range: RecordedRange): boolean =>
+      range.path === path &&
+      range.startLine <= claim.startLine &&
+      claim.endLine <= range.endLine;
+    return this.ranges.some(contained) || this.carried.some(contained);
   }
 
   /** Clear every recorded range (start of a new turn). */
   resetTurn(): void {
     this.ranges = [];
+    this.carried = [];
   }
 }
 

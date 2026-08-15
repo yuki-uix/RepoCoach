@@ -25,6 +25,9 @@ const SYSTEM_ROLE = [
   "  the read/search tools, and record it with repo_save_evidence.",
   "- Do not re-read the same (file, line range) more than once in a turn — reuse the",
   "  earlier result. Read only the specific ranges you need.",
+  "- Ranges shown in an 'already-read' context block are already in context: cite them",
+  "  directly, do not re-read them. Ranges listed there as 'content omitted' must still",
+  "  be read before citing.",
   "- End the turn by calling submit_decision with a structured decision. Never produce",
   "  a final answer as plain text.",
 ].join("\n");

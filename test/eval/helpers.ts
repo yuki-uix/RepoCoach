@@ -26,6 +26,9 @@ export function makeEvalRun(overrides: Partial<EvalRun> = {}): EvalRun {
     wallClockMs: 0,
     degraded: false,
     endedPhase: "recap",
+    toolCalls: {},
+    repeatedReads: 0,
+    carriedBytes: [],
     ...overrides,
   };
 }

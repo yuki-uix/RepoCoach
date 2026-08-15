@@ -19,6 +19,7 @@ export {
   orderedPaths,
   pathAccuracy,
   questionJaccard,
+  repeatedReadCount,
   sessionCost,
 } from "./metrics.js";
 export type {
@@ -28,6 +29,7 @@ export type {
   PathAccuracyResult,
   PrecisionFailure,
   PrecisionResult,
+  ReadOccurrence,
 } from "./metrics.js";
 
 export { judgeSamples } from "./judge.js";
@@ -42,8 +44,18 @@ export type {
   ModelAssessmentLabel,
 } from "./judge.js";
 
-export { buildReport, renderReport, serializeReport, writeReport } from "./report.js";
+export {
+  abComparisonValidity,
+  buildReport,
+  renderAbComparison,
+  renderReport,
+  serializeReport,
+  writeReport,
+} from "./report.js";
 export type { EvalMode, EvalReport, ReportMetrics } from "./report.js";
+
+export { runAbEval, runEval } from "./cli.js";
+export type { EvalCliOptions } from "./cli.js";
 
 export { createMockEvalProvider, MockEvalProvider } from "./mock-provider.js";
 export type { MockEvalConfig } from "./mock-provider.js";

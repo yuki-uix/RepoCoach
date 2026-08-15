@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_TOOL_RESULT_BYTES,
+  REPO_DATA_END,
+  SessionReadCache,
   byteLength,
   createToolRegistry,
+  escapedByteLength,
   type Evidence,
   type EvidenceValidator,
   type ReturnRecorder,
@@ -372,6 +375,65 @@ describe("same-turn read dedup", () => {
   });
 });
 
+describe("carried-range read dedup", () => {
+  it("returns a short hint instead of re-sending a range already carried in context", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    ledger.recordCarried("src/index.ts", 1, 3);
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("本轮上下文中已携带");
+    expect(result).not.toContain("return a + b");
+  });
+
+  it("does not dedup a sub-range of a carried range", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    ledger.recordCarried("src/index.ts", 1, 3);
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 2, endLine: 2 },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("2 |   return a + b;");
+  });
+});
+
+describe("session read cache recording", () => {
+  it("records the shown range and numbered content into the cache", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const cache = new SessionReadCache();
+    const registry = createToolRegistry({ reader, repo, readCache: cache });
+
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 99 },
+      collectedEvidence: [],
+    });
+
+    // The request for 1-99 is clamped to the file's 3 lines; the cached range is
+    // the shown range, and its content is the numbered lines.
+    expect(cache.ranges).toHaveLength(1);
+    const cached = cache.ranges[0]!;
+    expect(cached.path).toBe("src/index.ts");
+    expect(cached.startLine).toBe(1);
+    expect(cached.endLine).toBe(3);
+    expect(cached.content).toContain("export function add");
+    expect(cached.content).toContain("return a + b;");
+    expect(cached.lastUsed).toBe(1);
+    expect(cached.cited).toBe(false);
+  });
+});
+
 describe("repo_read_file truncation", () => {
   it("truncates a large read and records only the shown range", async () => {
     const bigLine = "const x = 1;\n";
@@ -435,6 +497,26 @@ describe("repo_read_file truncation", () => {
     expect(shownLines).toBeGreaterThan(0);
     expect(shownLines).toBeLessThan(100);
     expect(records).toEqual([{ path: "src/big.ts", startLine: 1, endLine: shownLines }]);
+  });
+
+  it("bills a marker-stuffed read by its escaped size so wrapping cannot exceed the cap", async () => {
+    // A file packed with forged END markers inflates once wrapRepoData escapes
+    // it; the tool must bill the escaped size so the result still fits the cap.
+    // Keep the file well under the reader's 512 KiB size limit but far over the
+    // 8 KiB tool-result cap.
+    const hostileLine = REPO_DATA_END.repeat(4);
+    const manyLines = Array.from({ length: 500 }, () => hostileLine).join("\n");
+    const { reader, repo } = makeTempReader({ "src/hostile.ts": `${manyLines}\n` });
+    const registry = createToolRegistry({ reader, repo });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/hostile.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("内容已截断");
+    expect(escapedByteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
   });
 });
 

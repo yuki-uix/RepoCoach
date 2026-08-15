@@ -45,4 +45,22 @@ export interface EvalRun {
   /** True when the session was salvaged after the agent failed to decide. */
   degraded: boolean;
   endedPhase: EvalEndPhase;
+  /**
+   * Tool-call counts per tool name (`repo_read_file`, `submit_decision`, …).
+   * A count, not a ratio: an empty run yields an empty object.
+   */
+  toolCalls: Record<string, number>;
+  /**
+   * Cross-turn re-reads — the number of times a (path, line range) was returned
+   * WITH content by repo_read_file in a different turn, minus one per range for
+   * its first read. This is the quantity #25 optimises directly. A count, not a
+   * ratio.
+   */
+  repeatedReads: number;
+  /**
+   * Bytes of already-read context carried into each later turn's context, one
+   * entry per turn that carried. Empty when the carry is off (pre-#25 behaviour)
+   * or when nothing was carried.
+   */
+  carriedBytes: number[];
 }

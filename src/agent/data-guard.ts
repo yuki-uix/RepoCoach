@@ -15,6 +15,8 @@
  * escaping discipline to those blocks, sharing the one escaping function.
  */
 
+import { byteLength, truncateBytes } from "./limits.js";
+
 export const REPO_DATA_START = "<<<REPO_DATA_START";
 export const REPO_DATA_END = "<<<REPO_DATA_END>>>";
 
@@ -62,6 +64,55 @@ export function escapeDataMarkers(content: string): string {
     .join(ESCAPED_UNTRUSTED_START);
 }
 
+/** Byte length of `content` after the shared marker escaping is applied. */
+export function escapedByteLength(content: string): number {
+  return byteLength(escapeDataMarkers(content));
+}
+
+/**
+ * Byte-truncate `text` (without splitting a multi-byte character) so its
+ * *escaped* form fits in `maxBytes`. Used where a raw string is measured before
+ * it is later wrapped and escaped: billing raw bytes lets marker-heavy content
+ * inflate past the cap once `escapeDataMarkers` runs. `escapeDataMarkers` only
+ * ever lengthens content, so this returns the longest prefix whose escaped form
+ * fits.
+ */
+export function truncateEscapedBytes(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  if (byteLength(escapeDataMarkers(text)) <= maxBytes) {
+    return { text, truncated: false };
+  }
+  let slice = "";
+  let escaped = 0;
+  for (const ch of text) {
+    const next = slice + ch;
+    const nextBytes = escaped + byteLength(ch) + escapeExpansionDelta(next);
+    if (nextBytes > maxBytes) {
+      break;
+    }
+    slice = next;
+    escaped = nextBytes;
+  }
+  return { text: slice, truncated: true };
+}
+
+/**
+ * Bytes `escapeDataMarkers` adds when a marker completes exactly at the end of
+ * `text`. A marker only expands once complete, and the four escaped stand-ins
+ * contain no further marker, so expansion never cascades across replacements.
+ */
+function escapeExpansionDelta(text: string): number {
+  if (text.endsWith(REPO_DATA_END)) return ESCAPED_REPO_END.length - REPO_DATA_END.length;
+  if (text.endsWith(REPO_DATA_START)) return ESCAPED_REPO_START.length - REPO_DATA_START.length;
+  if (text.endsWith(UNTRUSTED_DATA_END)) return ESCAPED_UNTRUSTED_END.length - UNTRUSTED_DATA_END.length;
+  if (text.endsWith(UNTRUSTED_DATA_START)) {
+    return ESCAPED_UNTRUSTED_START.length - UNTRUSTED_DATA_START.length;
+  }
+  return 0;
+}
+
 /**
  * Escape markers and collapse newlines so a header attribute value cannot fake
  * a boundary or forge an extra multi-line header. Newlines are collapsed first
@@ -76,6 +127,42 @@ export function wrapRepoData(content: string, meta: RepoDataMeta): string {
   const pathAttr = meta.path !== undefined ? ` path=${sanitizeHeaderValue(meta.path)}` : "";
   const header = `${REPO_DATA_START} tool=${sanitizeHeaderValue(meta.tool)}${pathAttr}>>>`;
   return `${header}\n${REPO_DATA_WARNING}\n${escapeDataMarkers(content)}\n${REPO_DATA_END}`;
+}
+
+/**
+ * The fixed bytes `wrapRepoData` adds around `content` for the given `meta`:
+ * header (tool + optional path), warning line, and closing marker.
+ * `wrapRepoData("", meta)` renders exactly that scaffolding with no content, so
+ * its byte length is the overhead a caller must reserve before fitting content.
+ */
+export function repoDataWrapperOverhead(meta: RepoDataMeta): number {
+  return byteLength(wrapRepoData("", meta));
+}
+
+/**
+ * Wrap a raw tool result and hard-cap the *wrapped* message at `maxBytes`.
+ *
+ * This is the single endpoint where a tool result's final size is bounded. The
+ * tools bill their escaped payload against a pre-reserved budget
+ * (`maxBytes - repoDataWrapperOverhead(meta)`), but the wrapped string — which
+ * is what actually becomes a `messages` entry — is what must never exceed the
+ * cap. The endpoint constraint wins over per-stage accounting: no matter how
+ * many layers of header/warning/path/escaping wrap the content, the returned
+ * string is guaranteed ≤ `maxBytes`.
+ *
+ * The wrapper overhead is reserved *before* the content is fit, so the returned
+ * string never needs a blind post-wrap byte-truncation that would silently drop
+ * ranges the tools already recorded as shown. When the header alone already
+ * exceeds the cap (a hostile tool path), the wrapper is returned with no content
+ * and hard-truncated so the message stays bounded.
+ */
+export function capRepoData(content: string, meta: RepoDataMeta, maxBytes: number): string {
+  const payloadBudget = maxBytes - repoDataWrapperOverhead(meta);
+  if (payloadBudget <= 0) {
+    return truncateBytes(wrapRepoData("", meta), maxBytes).text;
+  }
+  const fit = truncateEscapedBytes(content, payloadBudget);
+  return wrapRepoData(fit.text, meta);
 }
 
 /**

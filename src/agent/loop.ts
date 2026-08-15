@@ -22,14 +22,21 @@ import type {
 import type { Repository, Reader } from "../reader/index.js";
 import type { ToolReturnLedger } from "../evidence/ledger.js";
 import {
-  wrapRepoData,
+  capRepoData,
+  escapedByteLength,
+  repoDataWrapperOverhead,
   wrapUntrustedContext,
   type RepoDataMeta,
 } from "./data-guard.js";
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { formatZodError } from "./errors.js";
 import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
-import { MAX_HISTORY_SUMMARY_BYTES, byteLength } from "./limits.js";
+import {
+  MAX_CARRIED_CONTEXT_BYTES,
+  MAX_HISTORY_SUMMARY_BYTES,
+  MAX_TOOL_RESULT_BYTES,
+  byteLength,
+} from "./limits.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type {
@@ -45,6 +52,7 @@ import {
   type EvidenceValidator,
   type ToolRegistry,
 } from "./tools.js";
+import { SessionReadCache, buildCarriedBlock } from "./read-cache.js";
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -67,7 +75,16 @@ export type AgentLoopEvent =
   | { type: "tool_call_started"; name: string; arguments: string }
   | { type: "tool_result"; name: string; result: string }
   | { type: "text_delta"; delta: string }
-  | { type: "decision_submitted"; decision: AgentDecision };
+  | { type: "decision_submitted"; decision: AgentDecision }
+  | {
+      type: "read_file_content";
+      path: string;
+      startLine: number;
+      endLine: number;
+      /** 0-based turn index the read happened in. */
+      turnIndex: number;
+    }
+  | { type: "carried_context"; bytes: number; turnIndex: number };
 
 export interface AgentLoopOptions {
   provider: ChatProvider;
@@ -79,6 +96,20 @@ export interface AgentLoopOptions {
   evidenceValidator?: EvidenceValidator;
   /** Per-turn record of tool returns; reset at the start of every turn. */
   ledger?: ToolReturnLedger;
+  /**
+   * Session-level record of already-read file ranges, carried across turns so
+   * the model does not re-read the same files every turn (issue #25). Defaults
+   * to a fresh in-memory cache when not injected — a resumed session rebuilds
+   * it empty, so its first turn re-reads (see read-cache.ts).
+   */
+  readCache?: SessionReadCache;
+  /**
+   * Whether to carry already-read ranges into later turns' context (issue #25).
+   * Defaults to true; `false` reproduces the pre-optimisation behaviour exactly
+   * (no carried block, no `recordCarried`) so the same instrumentation can
+   * measure both arms of the A/B comparison.
+   */
+  carryReadContext?: boolean;
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -144,19 +175,34 @@ export class AgentLoop {
   private readonly maxDecisionRetries: number;
   private readonly evidenceValidator?: EvidenceValidator;
   private readonly ledger?: ToolReturnLedger;
+  private readonly readCache: SessionReadCache;
+  private readonly carryReadContext: boolean;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
+  /** 0-based turn index of the invoke currently running (set at invoke start). */
+  private currentTurnIndex = 0;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
     this.evidenceValidator = options.evidenceValidator;
     this.ledger = options.ledger;
+    this.readCache = options.readCache ?? new SessionReadCache();
+    this.carryReadContext = options.carryReadContext ?? true;
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
       evidenceValidator: options.evidenceValidator,
       returnRecorder: options.ledger,
+      readCache: this.readCache,
+      onContentRead: (path, startLine, endLine) =>
+        this.emit({
+          type: "read_file_content",
+          path,
+          startLine,
+          endLine,
+          turnIndex: this.currentTurnIndex,
+        }),
     });
     this.model = options.model ?? DEFAULT_DEEPSEEK_MODEL;
     this.maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
@@ -170,6 +216,7 @@ export class AgentLoop {
   async invoke(input: AgentInvokerInput): Promise<AgentInvocation> {
     // A new turn starts: clear last turn's tool returns and advance the
     // validator's turn association (turnIndex = number of completed turns).
+    this.currentTurnIndex = input.turnHistory.length;
     this.ledger?.resetTurn();
     this.evidenceValidator?.setTurnIndex?.(input.turnHistory.length);
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
@@ -237,6 +284,15 @@ export class AgentLoop {
             // fabricated evidence straight into submit_decision.
             const groundingError = this.validateDecisionEvidence(outcome.decision);
             if (groundingError === null) {
+              // The accepted citations are the ranges the model keeps referring
+              // back to; mark them so the carry budget keeps them next turn.
+              for (const evidence of outcome.decision.evidence) {
+                this.readCache.markCited(
+                  evidence.path,
+                  evidence.startLine,
+                  evidence.endLine,
+                );
+              }
               this.emit({ type: "decision_submitted", decision: outcome.decision });
               this.logger.info("agent decision submitted", {
                 nextAction: outcome.decision.nextAction,
@@ -259,26 +315,43 @@ export class AgentLoop {
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
-            content: wrapRepoData(stray, { tool: toolCall.name }),
+            content: capRepoData(stray, { tool: toolCall.name }, MAX_TOOL_RESULT_BYTES),
           });
           continue;
         }
 
         const args = parseArguments(toolCall.arguments);
-        const result =
-          args === undefined
-            ? "Error: tool arguments are not valid JSON"
-            : await this.tools.execute({ name: toolCall.name, args, collectedEvidence });
-        this.emit({ type: "tool_result", name: toolCall.name, result });
-        this.logger.debug("agent tool result", { tool: toolCall.name });
         const meta: RepoDataMeta = {
           tool: toolCall.name,
           path: pathOfTool(toolCall.name, args),
         };
+        // ENDPOINT CONSTRAINT: this is the single place a repo tool result
+        // becomes a `messages` entry. Whatever the tools returned is wrapped
+        // here, so the final message size is enforced *here* on the wrapped
+        // string — endpoint constraint beats per-stage accounting. The tools
+        // bill their escaped payload against `maxBytes` (the wrapper overhead
+        // already reserved off MAX_TOOL_RESULT_BYTES), and `capRepoData` is the
+        // final guarantee the assembled content never exceeds it. Message kinds
+        // capped at assembly:
+        //   - repo tool results (read/search/tree/package-info/save-evidence +
+        //     error results) → MAX_TOOL_RESULT_BYTES via capRepoData;
+        //   - cross-turn carried block → MAX_CARRIED_CONTEXT_BYTES via
+        //     buildCarriedBlock (already wraps + hard-caps before this point).
+        const result =
+          args === undefined
+            ? "Error: tool arguments are not valid JSON"
+            : await this.tools.execute({
+                name: toolCall.name,
+                args,
+                collectedEvidence,
+                maxBytes: MAX_TOOL_RESULT_BYTES - repoDataWrapperOverhead(meta),
+              });
+        this.emit({ type: "tool_result", name: toolCall.name, result });
+        this.logger.debug("agent tool result", { tool: toolCall.name });
         messages.push({
           role: "tool",
           toolCallId: toolCall.id,
-          content: wrapRepoData(result, meta),
+          content: capRepoData(result, meta, MAX_TOOL_RESULT_BYTES),
         });
       }
     }
@@ -303,8 +376,39 @@ export class AgentLoop {
         content: wrapUntrustedContext(history, { kind: "turn_history" }),
       });
     }
+    const carried = this.buildCarriedContextBlock(input.turnHistory.length);
+    if (carried !== null) {
+      // Already UNTRUSTED_DATA-wrapped (and hard-capped) inside the builder, so
+      // it is pushed verbatim rather than wrapped a second time here.
+      messages.push({ role: "user", content: carried });
+    }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;
+  }
+
+  /**
+   * Build the cross-turn "already-read" context block for turn 2 onward. Carries
+   * a byte-bounded subset of the session read cache with full content (recording
+   * exactly those ranges into the ledger as context-carried, so they become
+   * citable without a re-read) and downgrades the rest to path + line range.
+   * Returns null on the first turn or when the cache is empty.
+   */
+  private buildCarriedContextBlock(turnIndex: number): string | null {
+    // The carry can be switched off (eval --no-carry) to reproduce the exact
+    // pre-#25 behaviour: no carried block is injected and nothing is recorded
+    // as carried, so the same instrumentation measures both arms of the A/B.
+    if (!this.carryReadContext || turnIndex === 0 || this.readCache.ranges.length === 0) {
+      return null;
+    }
+    const built = buildCarriedBlock(this.readCache.ranges, MAX_CARRIED_CONTEXT_BYTES);
+    // Only the ranges whose content actually landed in context are citable —
+    // `buildCarriedBlock` returns exactly those after its hard cap, so any entry
+    // it dropped is never recorded as carried (the model never saw its content).
+    for (const range of built.carried) {
+      this.ledger?.recordCarried(range.path, range.startLine, range.endLine);
+    }
+    this.emit({ type: "carried_context", bytes: byteLength(built.content), turnIndex });
+    return built.content;
   }
 
   private async callProvider(
@@ -405,7 +509,10 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   }
   const prefix = "Previous turns:\n";
   const full = `${prefix}${turns.map(formatTurnLine).join("\n")}`;
-  if (byteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
+  // Turn fields are model-generated from repo content, so they are later
+  // escaped by `wrapUntrustedContext`. Bill their escaped size, or marker-heavy
+  // feedback/question text would inflate past the cap after escaping.
+  if (escapedByteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
     return full;
   }
   // Cap the summary: keep the most recent turns in full and collapse the older
@@ -421,11 +528,11 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   while (index >= 0) {
     const line = formatTurnLine(turns[index]!, index);
     const separator = kept.length === 0 ? 0 : 1;
-    if (byteLength(line) + separator + keptBytes > budget) {
+    if (escapedByteLength(line) + separator + keptBytes > budget) {
       break;
     }
     kept.unshift(line);
-    keptBytes += byteLength(line) + separator;
+    keptBytes += escapedByteLength(line) + separator;
     index -= 1;
   }
   const omitted = index + 1;
