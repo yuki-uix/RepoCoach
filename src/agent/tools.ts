@@ -9,9 +9,10 @@
  * constructive grounding) and appends accepted claims to the turn's list.
  *
  * Byte-cap coverage (§6 "同一道闸覆盖所有出口"): every string an executor
- * returns to the model is bounded by MAX_TOOL_RESULT_BYTES *after* the
- * data-guard wrapper escapes it — each site bills the escaped size so a
- * marker-stuffed file cannot inflate past the cap.
+ * returns to the model is bounded by the execution's `maxBytes` budget (which
+ * the loop derives by reserving the data-guard wrapper overhead off
+ * MAX_TOOL_RESULT_BYTES) *after* the wrapper escapes it — each site bills the
+ * escaped size so a marker-stuffed file cannot inflate past the cap.
  *
  * - repo_get_tree   → truncateEscapedBytes over the file listing (+ note when cut)
  * - repo_search     → per-match whole-line escaped truncation (+ note), recorder
@@ -85,6 +86,14 @@ export interface ToolExecution {
   args: unknown;
   /** This turn's collected evidence list — repo_save_evidence appends here. */
   collectedEvidence: Evidence[];
+  /**
+   * Byte budget for the *payload* this execution may return. The loop reserves
+   * the data-guard wrapper overhead off MAX_TOOL_RESULT_BYTES and passes the
+   * remainder here, so the wrapped tool message stays within the overall cap.
+   * Defaults to MAX_TOOL_RESULT_BYTES when absent (direct callers that do not
+   * wrap their result).
+   */
+  maxBytes?: number;
 }
 
 export interface ToolRegistry {
@@ -189,11 +198,12 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
   const validator = runtime.evidenceValidator ?? acceptAllEvidence;
 
   async function execute(execution: ToolExecution): Promise<string> {
+    const cap = execution.maxBytes ?? MAX_TOOL_RESULT_BYTES;
     try {
-      return await executeTool(runtime, validator, execution);
+      return await executeTool(runtime, validator, execution, cap);
     } catch (error) {
       const message = `Error: ${error instanceof Error ? error.message : String(error)}`;
-      return truncateEscapedBytes(message, MAX_TOOL_RESULT_BYTES).text;
+      return truncateEscapedBytes(message, cap).text;
     }
   }
 
@@ -213,6 +223,7 @@ function executeTool(
   runtime: ToolRuntime,
   validator: EvidenceValidator,
   execution: ToolExecution,
+  cap: number,
 ): string | Promise<string> {
   switch (execution.name) {
     case "repo_get_tree": {
@@ -221,11 +232,11 @@ function executeTool(
         return "(no readable files)";
       }
       const listing = entries.map((entry) => `${entry.path} (${entry.size} bytes)`).join("\n");
-      if (escapedByteLength(listing) <= MAX_TOOL_RESULT_BYTES) {
+      if (escapedByteLength(listing) <= cap) {
         return listing;
       }
       const note = `\n(结果已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，可用 repo_search 定位具体文件)`;
-      const capped = truncateEscapedBytes(listing, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      const capped = truncateEscapedBytes(listing, cap - byteLength(note));
       return `${capped.text}${note}`;
     }
 
@@ -234,7 +245,7 @@ function executeTool(
       if (!parsed.success) {
         return `Error: ${formatZodError(parsed.error)}`;
       }
-      return search(runtime, parsed.data);
+      return search(runtime, parsed.data, cap);
     }
 
     case "repo_read_file": {
@@ -242,17 +253,17 @@ function executeTool(
       if (!parsed.success) {
         return `Error: ${formatZodError(parsed.error)}`;
       }
-      return readFile(runtime, parsed.data);
+      return readFile(runtime, parsed.data, cap);
     }
 
     case "repo_get_package_info": {
       const info = runtime.reader.getPackageInfo(runtime.repo);
       const text = JSON.stringify(info, null, 2);
-      if (escapedByteLength(text) <= MAX_TOOL_RESULT_BYTES) {
+      if (escapedByteLength(text) <= cap) {
         return text;
       }
       const note = `\n(内容已截断：超过 ${MAX_TOOL_RESULT_BYTES} 字节，脚本 ${info.scripts.length} 个、依赖 ${info.dependencies.length} 个)`;
-      const capped = truncateEscapedBytes(text, MAX_TOOL_RESULT_BYTES - byteLength(note));
+      const capped = truncateEscapedBytes(text, cap - byteLength(note));
       return `${capped.text}${note}`;
     }
 
@@ -265,14 +276,14 @@ function executeTool(
       if (!verdict.ok) {
         return truncateEscapedBytes(
           `Error: evidence rejected: ${verdict.reason}`,
-          MAX_TOOL_RESULT_BYTES,
+          cap,
         ).text;
       }
       execution.collectedEvidence.push(parsed.data);
       const evidence = parsed.data;
       return truncateEscapedBytes(
         `Saved evidence: ${evidence.path} lines ${evidence.startLine}-${evidence.endLine} (${evidence.reason})`,
-        MAX_TOOL_RESULT_BYTES,
+        cap,
       ).text;
     }
 
@@ -284,6 +295,7 @@ function executeTool(
 async function search(
   runtime: ToolRuntime,
   args: { pattern: string; contextLines?: number },
+  cap: number,
 ): Promise<string> {
   const matches = await runtime.reader.search(
     runtime.repo,
@@ -298,7 +310,7 @@ async function search(
   // see. The note that signals truncation consumes bytes too, so it is reserved
   // up front — every match (including the first) is cut to whole display lines.
   const note = "\n\n(结果已截断：更多匹配未显示，可用更窄的 pattern 或更小的 contextLines 重搜)";
-  const contentBudget = MAX_TOOL_RESULT_BYTES - byteLength(note);
+  const contentBudget = cap - byteLength(note);
   const parts: string[] = [];
   let usedBytes = 0;
 
@@ -408,6 +420,7 @@ function truncateMatchLines(
 function readFile(
   runtime: ToolRuntime,
   args: { path: string; startLine?: number; endLine?: number },
+  cap: number,
 ): string {
   const slice = runtime.reader.readFile(
     runtime.repo,
@@ -446,7 +459,7 @@ function readFile(
     Math.max(byteLength(noteTruncated), byteLength(noteUncitable));
   const fit = fitSourceLines(
     slice.content,
-    MAX_TOOL_RESULT_BYTES - reservedBytes,
+    cap - reservedBytes,
     slice.startLine,
     escapedByteLength,
     truncateEscapedBytes,

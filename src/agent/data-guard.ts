@@ -15,7 +15,7 @@
  * escaping discipline to those blocks, sharing the one escaping function.
  */
 
-import { byteLength } from "./limits.js";
+import { byteLength, truncateBytes } from "./limits.js";
 
 export const REPO_DATA_START = "<<<REPO_DATA_START";
 export const REPO_DATA_END = "<<<REPO_DATA_END>>>";
@@ -127,6 +127,42 @@ export function wrapRepoData(content: string, meta: RepoDataMeta): string {
   const pathAttr = meta.path !== undefined ? ` path=${sanitizeHeaderValue(meta.path)}` : "";
   const header = `${REPO_DATA_START} tool=${sanitizeHeaderValue(meta.tool)}${pathAttr}>>>`;
   return `${header}\n${REPO_DATA_WARNING}\n${escapeDataMarkers(content)}\n${REPO_DATA_END}`;
+}
+
+/**
+ * The fixed bytes `wrapRepoData` adds around `content` for the given `meta`:
+ * header (tool + optional path), warning line, and closing marker.
+ * `wrapRepoData("", meta)` renders exactly that scaffolding with no content, so
+ * its byte length is the overhead a caller must reserve before fitting content.
+ */
+export function repoDataWrapperOverhead(meta: RepoDataMeta): number {
+  return byteLength(wrapRepoData("", meta));
+}
+
+/**
+ * Wrap a raw tool result and hard-cap the *wrapped* message at `maxBytes`.
+ *
+ * This is the single endpoint where a tool result's final size is bounded. The
+ * tools bill their escaped payload against a pre-reserved budget
+ * (`maxBytes - repoDataWrapperOverhead(meta)`), but the wrapped string — which
+ * is what actually becomes a `messages` entry — is what must never exceed the
+ * cap. The endpoint constraint wins over per-stage accounting: no matter how
+ * many layers of header/warning/path/escaping wrap the content, the returned
+ * string is guaranteed ≤ `maxBytes`.
+ *
+ * The wrapper overhead is reserved *before* the content is fit, so the returned
+ * string never needs a blind post-wrap byte-truncation that would silently drop
+ * ranges the tools already recorded as shown. When the header alone already
+ * exceeds the cap (a hostile tool path), the wrapper is returned with no content
+ * and hard-truncated so the message stays bounded.
+ */
+export function capRepoData(content: string, meta: RepoDataMeta, maxBytes: number): string {
+  const payloadBudget = maxBytes - repoDataWrapperOverhead(meta);
+  if (payloadBudget <= 0) {
+    return truncateBytes(wrapRepoData("", meta), maxBytes).text;
+  }
+  const fit = truncateEscapedBytes(content, payloadBudget);
+  return wrapRepoData(fit.text, meta);
 }
 
 /**

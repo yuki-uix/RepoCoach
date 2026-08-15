@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_TOOL_RESULT_BYTES,
   REPO_DATA_END,
   REPO_DATA_START,
   REPO_DATA_WARNING,
@@ -7,8 +8,10 @@ import {
   UNTRUSTED_DATA_START,
   UNTRUSTED_DATA_WARNING,
   byteLength,
+  capRepoData,
   escapeDataMarkers,
   escapedByteLength,
+  repoDataWrapperOverhead,
   truncateEscapedBytes,
   wrapRepoData,
   wrapUntrustedContext,
@@ -137,6 +140,39 @@ describe("escapedByteLength", () => {
 
   it("equals the raw length for marker-free content", () => {
     expect(escapedByteLength("hello 世界")).toBe(byteLength("hello 世界"));
+  });
+});
+
+describe("capRepoData", () => {
+  it("keeps a marker-heavy tool result within the cap once wrapped", () => {
+    const content = REPO_DATA_END.repeat(400); // escaped form alone is ~11 KiB
+    const capped = capRepoData(
+      content,
+      { tool: "repo_read_file", path: "src/a.ts" },
+      MAX_TOOL_RESULT_BYTES,
+    );
+
+    expect(byteLength(capped)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(capped).toContain(REPO_DATA_START);
+    expect(capped).toContain(REPO_DATA_WARNING);
+    // Only the wrapper's own closing marker survives; forged ones are escaped.
+    expect(capped.split(REPO_DATA_END).length - 1).toBe(1);
+  });
+
+  it("stays bounded when the header alone (a hostile path) exceeds the cap", () => {
+    const hostilePath = REPO_DATA_END.repeat(1000);
+    const capped = capRepoData(
+      "",
+      { tool: "repo_read_file", path: hostilePath },
+      MAX_TOOL_RESULT_BYTES,
+    );
+
+    expect(byteLength(capped)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("reports the wrapper overhead as the empty-content wrapper length", () => {
+    const meta = { tool: "repo_read_file", path: "src/a.ts" };
+    expect(repoDataWrapperOverhead(meta)).toBe(byteLength(wrapRepoData("", meta)));
   });
 });
 

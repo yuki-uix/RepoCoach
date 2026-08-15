@@ -7,7 +7,9 @@ import {
   AgentDecisionInvalidError,
   AgentLoop,
   DeepSeekProvider,
+  MAX_CARRIED_CONTEXT_BYTES,
   MAX_HISTORY_SUMMARY_BYTES,
+  MAX_TOOL_RESULT_BYTES,
   REPO_DATA_END,
   REPO_DATA_START,
   REPO_DATA_WARNING,
@@ -690,5 +692,153 @@ describe("AgentLoop cross-turn read cache", () => {
     );
     expect(carriedMessage?.content).toContain("src/index.ts (lines 1-3):");
     expect(carriedMessage?.content).toContain("export function add");
+  });
+});
+
+describe("AgentLoop final message cap", () => {
+  const priorTurn: LearningTurn = {
+    sessionId: "s1",
+    question: "Where does it start?",
+    userAnswer: "index.ts",
+    evidence: [],
+    assessment: "correct",
+  };
+
+  /** Run the loop once with a scripted first tool call, returning the requests. */
+  async function invokeWithFirstCall(
+    files: Record<string, string>,
+    firstCall: ChatMessage,
+    opts: Partial<AgentLoopOptions> = {},
+  ): Promise<ChatCompletionRequest[]> {
+    const { reader, repo } = makeTempReader(files);
+    const requests: ChatCompletionRequest[] = [];
+    const provider: ChatProvider = {
+      async complete(request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          return { message: firstCall, usage: { inputTokens: 1, outputTokens: 1 } };
+        }
+        return {
+          message: toolMessage("submit", "submit_decision", DECISION),
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+    const loop = new AgentLoop({ ...opts, provider, reader, repo });
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+    return requests;
+  }
+
+  function toolContent(requests: ChatCompletionRequest[]): string {
+    return requests[1].messages.find((m) => m.role === "tool")?.content ?? "";
+  }
+
+  it("caps the wrapped repo_read_file result (overlong hostile line) and keeps dropped lines uncitable", async () => {
+    const overlong = "x".repeat(8_000) + REPO_DATA_END;
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({ ledger, store, sessionId: "s1" });
+
+    const requests = await invokeWithFirstCall(
+      { "src/hostile.ts": `${overlong}\n` },
+      toolMessage("c1", "repo_read_file", JSON.stringify({ path: "src/hostile.ts" })),
+      { ledger, evidenceValidator: validator },
+    );
+
+    const content = toolContent(requests);
+    expect(content).toContain(REPO_DATA_START);
+    expect(content).toContain(REPO_DATA_END);
+    expect(byteLength(content)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    // The single overlong line was byte-truncated (never fully shown), so a
+    // citation of it is not grounded.
+    expect(
+      ledger.isGrounded({ path: "src/hostile.ts", startLine: 1, endLine: 1, reason: "" }),
+    ).toBe(false);
+  });
+
+  it("records only the shown prefix of a hostile multi-line read so dropped lines stay uncitable", async () => {
+    const line = `line ${REPO_DATA_END} ${"x".repeat(80)}`;
+    const manyLines = Array.from({ length: 400 }, () => line).join("\n");
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({ ledger, store, sessionId: "s1" });
+
+    const requests = await invokeWithFirstCall(
+      { "src/big.ts": `${manyLines}\n` },
+      toolMessage("c1", "repo_read_file", JSON.stringify({ path: "src/big.ts" })),
+      { ledger, evidenceValidator: validator },
+    );
+
+    expect(byteLength(toolContent(requests))).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    // The first line is shown and citable; a line far past the cap is not.
+    expect(ledger.isGrounded({ path: "src/big.ts", startLine: 1, endLine: 1, reason: "" })).toBe(true);
+    expect(ledger.isGrounded({ path: "src/big.ts", startLine: 400, endLine: 400, reason: "" })).toBe(false);
+  });
+
+  it("caps the wrapped repo_search result full of forged markers", async () => {
+    const hostileLine = REPO_DATA_END;
+    const manyLines = Array.from({ length: 300 }, () => hostileLine).join("\n");
+    const requests = await invokeWithFirstCall(
+      { "src/hostile.ts": `${manyLines}\n` },
+      toolMessage("c1", "repo_search", JSON.stringify({ pattern: REPO_DATA_END, contextLines: 0 })),
+    );
+
+    const content = toolContent(requests);
+    expect(content).toContain("结果已截断");
+    expect(byteLength(content)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("caps the wrapped repo_get_tree result with a forged-marker filename", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 600; i++) {
+      files[`src/file_${String(i).padStart(4, "0")}.ts`] = "export const x = 1;\n";
+    }
+    files[`src/hostile-${REPO_DATA_END}.ts`] = "export const y = 2;\n";
+
+    const requests = await invokeWithFirstCall(
+      files,
+      toolMessage("c1", "repo_get_tree", "{}"),
+    );
+
+    const content = toolContent(requests);
+    expect(content).toContain("结果已截断");
+    expect(byteLength(content)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("caps the wrapped repo_get_package_info result with a forged-marker dependency", async () => {
+    const dependencies: Record<string, string> = { [`hostile-${REPO_DATA_END}`]: "^1.0.0" };
+    for (let i = 0; i < 600; i++) {
+      dependencies[`dependency-${i}`] = "^1.0.0";
+    }
+
+    const requests = await invokeWithFirstCall(
+      { "package.json": JSON.stringify({ name: "big", dependencies }) },
+      toolMessage("c1", "repo_get_package_info", "{}"),
+    );
+
+    const content = toolContent(requests);
+    expect(content).toContain("内容已截断");
+    expect(byteLength(content)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("caps the carried context block at MAX_CARRIED_CONTEXT_BYTES with adversarial content", async () => {
+    const readCache = new SessionReadCache();
+    const hostile = REPO_DATA_END.repeat(50);
+    for (let i = 0; i < 40; i++) {
+      readCache.record(`src/file-${i}.ts`, 1, 1, hostile);
+    }
+    const { provider, requests } = scriptedProvider(() => toolMessage("t", "submit_decision", DECISION));
+    const loop = makeLoop(provider, { readCache });
+
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [priorTurn] });
+
+    const carriedMessage = requests[0].messages.find(
+      (m) => m.role === "user" && (m.content ?? "").includes("kind=already_read"),
+    );
+    expect(carriedMessage).toBeDefined();
+    expect(byteLength(carriedMessage?.content ?? "")).toBeLessThanOrEqual(MAX_CARRIED_CONTEXT_BYTES);
+    // The hostile content is too large to all fit once escaped, so some ranges
+    // are downgraded rather than carried in full.
+    expect(carriedMessage?.content).toContain("content omitted");
   });
 });

@@ -22,8 +22,9 @@ import type {
 import type { Repository, Reader } from "../reader/index.js";
 import type { ToolReturnLedger } from "../evidence/ledger.js";
 import {
+  capRepoData,
   escapedByteLength,
-  wrapRepoData,
+  repoDataWrapperOverhead,
   wrapUntrustedContext,
   type RepoDataMeta,
 } from "./data-guard.js";
@@ -33,6 +34,7 @@ import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
 import {
   MAX_CARRIED_CONTEXT_BYTES,
   MAX_HISTORY_SUMMARY_BYTES,
+  MAX_TOOL_RESULT_BYTES,
   byteLength,
 } from "./limits.js";
 import type { AgentLogger } from "./logger.js";
@@ -313,26 +315,43 @@ export class AgentLoop {
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
-            content: wrapRepoData(stray, { tool: toolCall.name }),
+            content: capRepoData(stray, { tool: toolCall.name }, MAX_TOOL_RESULT_BYTES),
           });
           continue;
         }
 
         const args = parseArguments(toolCall.arguments);
-        const result =
-          args === undefined
-            ? "Error: tool arguments are not valid JSON"
-            : await this.tools.execute({ name: toolCall.name, args, collectedEvidence });
-        this.emit({ type: "tool_result", name: toolCall.name, result });
-        this.logger.debug("agent tool result", { tool: toolCall.name });
         const meta: RepoDataMeta = {
           tool: toolCall.name,
           path: pathOfTool(toolCall.name, args),
         };
+        // ENDPOINT CONSTRAINT: this is the single place a repo tool result
+        // becomes a `messages` entry. Whatever the tools returned is wrapped
+        // here, so the final message size is enforced *here* on the wrapped
+        // string — endpoint constraint beats per-stage accounting. The tools
+        // bill their escaped payload against `maxBytes` (the wrapper overhead
+        // already reserved off MAX_TOOL_RESULT_BYTES), and `capRepoData` is the
+        // final guarantee the assembled content never exceeds it. Message kinds
+        // capped at assembly:
+        //   - repo tool results (read/search/tree/package-info/save-evidence +
+        //     error results) → MAX_TOOL_RESULT_BYTES via capRepoData;
+        //   - cross-turn carried block → MAX_CARRIED_CONTEXT_BYTES via
+        //     buildCarriedBlock (already wraps + hard-caps before this point).
+        const result =
+          args === undefined
+            ? "Error: tool arguments are not valid JSON"
+            : await this.tools.execute({
+                name: toolCall.name,
+                args,
+                collectedEvidence,
+                maxBytes: MAX_TOOL_RESULT_BYTES - repoDataWrapperOverhead(meta),
+              });
+        this.emit({ type: "tool_result", name: toolCall.name, result });
+        this.logger.debug("agent tool result", { tool: toolCall.name });
         messages.push({
           role: "tool",
           toolCallId: toolCall.id,
-          content: wrapRepoData(result, meta),
+          content: capRepoData(result, meta, MAX_TOOL_RESULT_BYTES),
         });
       }
     }
