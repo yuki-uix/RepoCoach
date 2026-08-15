@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CARRIED_CONTEXT_BYTES,
   SessionReadCache,
   byteLength,
+  carriedContextFixedBytes,
   formatCarriedBlock,
   selectCarryRanges,
   type CachedRange,
@@ -67,8 +69,12 @@ describe("selectCarryRanges", () => {
     cache.record("src/cited.ts", 1, 1, "cited"); // lastUsed 2
     cache.markCited("src/cited.ts", 1, 1);
 
-    // Budget fits exactly one entry (each is ~20 bytes of content + header).
-    const { carry, omitted } = selectCarryRanges(cache.ranges, 40);
+    // Budget fits exactly one entry: the fixed block overhead plus one entry.
+    const oneEntryBytes = byteLength("src/cited.ts (lines 1-1):\ncited");
+    const { carry, omitted } = selectCarryRanges(
+      cache.ranges,
+      carriedContextFixedBytes() + oneEntryBytes,
+    );
 
     expect(carry.map((r) => r.path)).toEqual(["src/cited.ts"]);
     expect(omitted.map((r) => r.path)).toEqual(["src/recent.ts"]);
@@ -79,7 +85,11 @@ describe("selectCarryRanges", () => {
     cache.record("src/older.ts", 1, 1, "older"); // lastUsed 1
     cache.record("src/newer.ts", 1, 1, "newer"); // lastUsed 2
 
-    const { carry, omitted } = selectCarryRanges(cache.ranges, 40);
+    const oneEntryBytes = byteLength("src/newer.ts (lines 1-1):\nnewer");
+    const { carry, omitted } = selectCarryRanges(
+      cache.ranges,
+      carriedContextFixedBytes() + oneEntryBytes,
+    );
 
     expect(carry.map((r) => r.path)).toEqual(["src/newer.ts"]);
     expect(omitted.map((r) => r.path)).toEqual(["src/older.ts"]);
@@ -92,7 +102,10 @@ describe("selectCarryRanges", () => {
 
     // Enough for the small entry but not the big one.
     const smallEntryBytes = byteLength("src/a.ts (lines 1-1):\nx");
-    const { carry, omitted } = selectCarryRanges(cache.ranges, smallEntryBytes + 1);
+    const { carry, omitted } = selectCarryRanges(
+      cache.ranges,
+      carriedContextFixedBytes() + smallEntryBytes + 1,
+    );
 
     // The big range is more recent, so it is tried first; it does not fit and
     // is downgraded, then the small one is carried.
@@ -120,5 +133,44 @@ describe("formatCarriedBlock", () => {
     const block = formatCarriedBlock([range("src/a.ts", 1, 1, "x")], []);
     expect(block).toContain("src/a.ts (lines 1-1):");
     expect(block).not.toContain("content omitted");
+  });
+});
+
+describe("carried-context budget", () => {
+  it("keeps the real formatCarriedBlock output within the cap for 1000 long-path ranges", () => {
+    const cache = new SessionReadCache();
+    for (let i = 0; i < 1000; i++) {
+      const longPath = `src/deeply/nested/module-${i}/subdir/another-level/very-long-file-name-${i}.ts`;
+      cache.record(longPath, 1, 50, `line ${i} content: ${"x".repeat(200)}`);
+    }
+
+    const { carry, omitted } = selectCarryRanges(cache.ranges, MAX_CARRIED_CONTEXT_BYTES);
+    const block = formatCarriedBlock(carry, omitted);
+
+    // The whole rendered block (lead + carried content + downgraded list) stays
+    // within the cap regardless of how many ranges are downgraded.
+    expect(byteLength(block)).toBeLessThanOrEqual(MAX_CARRIED_CONTEXT_BYTES);
+
+    // Carried content still fills most of the budget — the reserved omitted
+    // section and fixed deductions must not starve it.
+    expect(byteLength(block)).toBeGreaterThan(MAX_CARRIED_CONTEXT_BYTES * 0.8);
+
+    // The downgraded tail is collapsed to one marker, not enumerated 1:1.
+    expect(block).toContain("more range(s)");
+  });
+
+  it("collapses the omitted list to a marker instead of enumerating every range", () => {
+    const carried = [range("src/kept.ts", 1, 1, "kept")];
+    const omitted = Array.from({ length: 100 }, (_, i) =>
+      range(`src/omitted-${i}.ts`, 1, 1, "should not appear"),
+    );
+
+    const block = formatCarriedBlock(carried, omitted);
+
+    expect(block).toContain("content omitted");
+    expect(block).toContain("more range(s)");
+    expect(block).not.toContain("should not appear");
+    // The downgraded range count is collapsed, not listed one entry per range.
+    expect(block).not.toContain("src/omitted-99.ts");
   });
 });

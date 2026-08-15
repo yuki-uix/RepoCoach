@@ -91,11 +91,29 @@ export function renderReport(report: EvalReport): string {
   lines.push(`ended:      ${renderInline(report.endedPhase)}${report.degraded ? " (degraded)" : ""}`);
   lines.push("");
 
+  appendRunValidity(lines, report);
   appendLiveSession(lines, report.run, metrics);
   lines.push("");
   appendJudgeMode(lines, report.judge);
 
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * A degraded or errored run must never read as a clean one: its metrics
+ * (especially the near-zero repeated reads and lower tool-call counts a failed
+ * run produces) are not comparable and would otherwise look like an
+ * improvement. Flag it prominently instead of burying it in the `ended` line.
+ */
+function appendRunValidity(lines: string[], report: EvalReport): void {
+  const reason = invalidRunReason(report);
+  if (reason === null) {
+    return;
+  }
+  lines.push("INVALID RUN");
+  lines.push(`This session ${reason}; its metric numbers are not comparable.`);
+  lines.push("Re-run before drawing conclusions.");
+  lines.push("");
 }
 
 function appendLiveSession(lines: string[], run: EvalRun, metrics: ReportMetrics): void {
@@ -273,12 +291,57 @@ function appendAdaptation(lines: string[], adaptation: AdaptationResult): void {
 }
 
 /**
+ * Why a run cannot serve as an A/B comparison arm; null when it is clean.
+ * A degraded recap (salvaged after the agent failed to decide) or an `error`
+ * phase produces near-zero repeated reads and lower call counts for reasons
+ * unrelated to the optimisation, so it must never be presented as a result.
+ */
+function invalidRunReason(report: EvalReport): string | null {
+  if (report.endedPhase === "error") {
+    return "ended in error (the agent produced no valid decision)";
+  }
+  if (report.degraded) {
+    return "was degraded (the agent failed to decide; the recap was salvaged)";
+  }
+  return null;
+}
+
+/**
+ * Whether the two arms of an A/B comparison are both valid (non-degraded and
+ * ending in `recap`). When invalid, `reason` names each offending arm and why.
+ */
+export function abComparisonValidity(
+  off: EvalReport,
+  on: EvalReport,
+): { valid: boolean; reason: string | null } {
+  const offReason = invalidRunReason(off);
+  const onReason = invalidRunReason(on);
+  const reasons: string[] = [];
+  if (offReason !== null) {
+    reasons.push(`carry OFF run ${offReason}`);
+  }
+  if (onReason !== null) {
+    reasons.push(`carry ON run ${onReason}`);
+  }
+  return reasons.length === 0
+    ? { valid: true, reason: null }
+    : { valid: false, reason: reasons.join("; ") };
+}
+
+/**
  * Side-by-side comparison of the "carry off" vs "carry on" arms of the #25
- * optimisation. Only the quantities that matter for the comparison are shown;
- * the note below the table makes clear that token counts are high-variance and
- * repeatedReads is the primary signal.
+ * optimisation. Refuses to render the table when either arm is not a clean
+ * (non-degraded, `recap`) run — a failed arm's 0 repeated reads would otherwise
+ * read as an optimisation win. Only the quantities that matter for the
+ * comparison are shown; the note below the table makes clear that token counts
+ * are high-variance and repeatedReads is the primary signal.
  */
 export function renderAbComparison(off: EvalReport, on: EvalReport): string {
+  const validity = abComparisonValidity(off, on);
+  if (!validity.valid) {
+    return renderAbNotEvaluable(validity.reason ?? "unknown reason");
+  }
+
   const offRun = off.run;
   const onRun = on.run;
   const offCalls = Object.values(offRun.toolCalls).reduce((sum, n) => sum + n, 0);
@@ -323,5 +386,16 @@ export function renderAbComparison(off: EvalReport, on: EvalReport): string {
   lines.push(
     "the exact waste this optimisation removes.",
   );
+  return `${lines.join("\n")}\n`;
+}
+
+/** The refusal message when one or both A/B arms are not valid runs. */
+function renderAbNotEvaluable(reason: string): string {
+  const lines = [
+    "RepoCoach Eval A/B (carry off vs carry on)",
+    "=".repeat(58),
+    `Not evaluable: ${reason}.`,
+    "A failed or degraded run is not evidence — re-run the arms before comparing.",
+  ];
   return `${lines.join("\n")}\n`;
 }

@@ -268,6 +268,28 @@ describe("report rendering (terminal gate)", () => {
     expect(out).not.toContain("adapted");
   });
 
+  it("flags a degraded or errored run prominently in the single-arm report", () => {
+    const degraded = buildReport({
+      mode: "mock",
+      run: makeEvalRun({ degraded: true }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const degradedOut = renderReport(degraded);
+    expect(degradedOut).toContain("INVALID RUN");
+    expect(degradedOut).toContain("degraded");
+
+    const errored = buildReport({
+      mode: "mock",
+      run: makeEvalRun({ endedPhase: "error" }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const erroredOut = renderReport(errored);
+    expect(erroredOut).toContain("INVALID RUN");
+    expect(erroredOut).toContain("ended in error");
+  });
+
   it("marks an empty run's instrumented counts as invalid instead of fabricating numbers", () => {
     const report = buildReport({
       mode: "mock",
@@ -322,6 +344,54 @@ describe("report rendering (terminal gate)", () => {
     expect(out).toMatch(/carried bytes\s+0\s+4000/);
     expect(out).toContain("137k-212k");
     expect(out).toContain("repeatedReads is the primary metric");
+  });
+
+  it("refuses to compare when the OFF arm ended in error", () => {
+    const off = buildReport({
+      mode: "real",
+      run: makeEvalRun({ endedPhase: "error", repeatedReads: 0, toolCalls: {} }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const on = buildReport({
+      mode: "real",
+      run: makeEvalRun({ repeatedReads: 1 }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+
+    const out = renderAbComparison(off, on);
+
+    // No comparison numbers, and the reason names the offending arm.
+    expect(out).toContain("Not evaluable");
+    expect(out).toContain("carry OFF");
+    expect(out).toContain("ended in error");
+    expect(out).not.toContain("repeatedReads");
+    expect(out).not.toContain("toolCalls");
+    expect(out).not.toContain("input tokens");
+  });
+
+  it("refuses to compare when the ON arm is degraded", () => {
+    const off = buildReport({
+      mode: "real",
+      run: makeEvalRun({ repeatedReads: 3 }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+    const on = buildReport({
+      mode: "real",
+      run: makeEvalRun({ degraded: true, endedPhase: "recap", repeatedReads: 0 }),
+      metrics: metrics(),
+      judge: judge(),
+    });
+
+    const out = renderAbComparison(off, on);
+
+    expect(out).toContain("Not evaluable");
+    expect(out).toContain("carry ON");
+    expect(out).toContain("degraded");
+    expect(out).not.toContain("repeatedReads");
+    expect(out).not.toContain("toolCalls");
   });
 
   it("renders an empty denominator as not evaluable, never 0.0%", () => {

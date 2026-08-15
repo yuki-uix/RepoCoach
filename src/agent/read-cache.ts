@@ -23,6 +23,7 @@
  */
 
 import { byteLength } from "./limits.js";
+import { wrapUntrustedContext } from "./data-guard.js";
 
 export interface CachedRange {
   path: string;
@@ -98,13 +99,61 @@ export interface CarrySelection {
   omitted: CachedRange[];
 }
 
+/** The fixed lead paragraph of the carried-context block. */
+const CARRIED_LEAD =
+  "Already-read ranges carried from earlier turns in this session. Ranges listed " +
+  "with their content are already in context: cite them directly, do not re-read " +
+  "them. For any other range, call repo_read_file first.";
+
+/** The fixed header above the downgraded (content-omitted) range list. */
+const OMITTED_HEADER = "(content omitted — call repo_read_file to fetch before citing:)";
+
+/**
+ * Fixed byte budget reserved for the omitted (path + range only) section. The
+ * omitted list grows with every range that does not fit as carried content, so
+ * it is capped at this size (entries plus an "… and N more range(s)" marker)
+ * and can never push the block over the overall cap.
+ */
+const OMITTED_SECTION_BYTES = 2 * 1024;
+
+/** Most downgraded ranges to list before collapsing the rest into one marker. */
+const OMITTED_MAX_LISTED = 20;
+
+/**
+ * The loop wraps the carried block in UNTRUSTED_DATA markers before it reaches
+ * the provider (see loop.ts), so the fixed wrapper overhead is part of the
+ * carried-context budget. `kind` must match the loop's
+ * `wrapUntrustedContext(…, { kind: "already_read" })` call.
+ */
+const CARRIED_WRAPPER_OVERHEAD_BYTES = byteLength(
+  wrapUntrustedContext("", { kind: "already_read" }),
+);
+
+/**
+ * The fixed bytes of the carried-context budget that are NOT carried content:
+ * the lead paragraph, the data-guard wrapper, and the reserved omitted section.
+ * Exposed so callers and tests can reason about the content budget precisely.
+ */
+export function carriedContextFixedBytes(): number {
+  return byteLength(CARRIED_LEAD) + CARRIED_WRAPPER_OVERHEAD_BYTES + OMITTED_SECTION_BYTES;
+}
+
 /** The formatted carried entry for one range (matches formatCarriedBlock). */
 function carriedEntry(range: CachedRange): string {
   return `${range.path} (lines ${range.startLine}-${range.endLine}):\n${range.content}`;
 }
 
+/** One downgraded range's path + line range line (content omitted). */
+function omittedLine(range: CachedRange): string {
+  return `\n${range.path} (lines ${range.startLine}-${range.endLine})`;
+}
+
 /**
- * Choose which cached ranges to carry in full, up to `maxBytes` of content.
+ * Choose which cached ranges to carry in full, up to `maxBytes` of *wrapped*
+ * carried context (the block plus the data-guard wrapper the loop adds). The
+ * fixed deductions (lead, wrapper, reserved omitted section) are taken off the
+ * top before any content is carried, so the block `formatCarriedBlock` renders
+ * is guaranteed to stay within `maxBytes` once wrapped.
  *
  * Ordering: ranges the model has cited come first (they are the ones it keeps
  * referring back to), then most-recently-read. Ranges that do not fit are
@@ -123,6 +172,7 @@ export function selectCarryRanges(
     return b.lastUsed - a.lastUsed;
   });
 
+  const carriedBudget = maxBytes - carriedContextFixedBytes();
   const carry: CachedRange[] = [];
   const omitted: CachedRange[] = [];
   let used = 0;
@@ -130,7 +180,7 @@ export function selectCarryRanges(
     const entryBytes = byteLength(carriedEntry(range));
     // Two separator bytes between carried entries (the "\n\n" in the block).
     const separator = carry.length === 0 ? 0 : 2;
-    if (used + separator + entryBytes <= maxBytes) {
+    if (carriedBudget > 0 && used + separator + entryBytes <= carriedBudget) {
       carry.push(range);
       used += separator + entryBytes;
     } else {
@@ -143,30 +193,53 @@ export function selectCarryRanges(
 /**
  * Format the carried-context block: the fixed lead line, then each carried
  * range's path/range header plus its content, then a downgraded list of
- * path + line ranges whose content was omitted. The caller wraps the result in
- * data-guard markers (repository content must never reach the system prompt).
+ * path + line ranges whose content was omitted. The downgraded list is capped
+ * at `OMITTED_SECTION_BYTES` with an "… and N more range(s)" marker, so the
+ * block never exceeds the budget even when every range is downgraded. The
+ * caller wraps the result in data-guard markers (repository content must never
+ * reach the system prompt).
  */
 export function formatCarriedBlock(
   carry: readonly CachedRange[],
   omitted: readonly CachedRange[],
 ): string {
-  const parts: string[] = [
-    "Already-read ranges carried from earlier turns in this session. Ranges listed " +
-      "with their content are already in context: cite them directly, do not re-read " +
-      "them. For any other range, call repo_read_file first.",
-  ];
+  const parts: string[] = [CARRIED_LEAD];
   for (const range of carry) {
     parts.push(`\n\n${carriedEntry(range)}`);
   }
-  if (omitted.length > 0) {
-    parts.push(
-      "\n\n(content omitted — call repo_read_file to fetch before citing:)",
-    );
-    for (const range of omitted) {
-      parts.push(`\n${range.path} (lines ${range.startLine}-${range.endLine})`);
-    }
-  }
+  parts.push(formatOmittedSection(omitted));
   return parts.join("");
+}
+
+/** Render the downgraded list within the reserved omitted-section byte budget. */
+function formatOmittedSection(omitted: readonly CachedRange[]): string {
+  if (omitted.length === 0) {
+    return "";
+  }
+  const header = `\n\n${OMITTED_HEADER}`;
+  // Reserve the longest possible overflow marker up front (the count is at most
+  // `omitted.length`, and "range(s)" keeps the suffix a constant length) so the
+  // section can never exceed the budget even when the marker is what doesn't fit.
+  const overflowMarker = `\n… and ${omitted.length} more range(s)`;
+  const lines: string[] = [];
+  let used = byteLength(header);
+  let listed = 0;
+  for (const range of omitted) {
+    if (listed >= OMITTED_MAX_LISTED) {
+      break;
+    }
+    const line = omittedLine(range);
+    const lineBytes = byteLength(line);
+    if (used + lineBytes + byteLength(overflowMarker) > OMITTED_SECTION_BYTES) {
+      break;
+    }
+    lines.push(line);
+    used += lineBytes;
+    listed += 1;
+  }
+  const unlisted = omitted.length - listed;
+  const suffix = unlisted > 0 ? `\n… and ${unlisted} more range(s)` : "";
+  return `${header}${lines.join("")}${suffix}`;
 }
 
 /** Repo paths are compared as POSIX, regardless of host separator. */

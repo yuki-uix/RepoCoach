@@ -33,6 +33,7 @@ import {
   sessionCost,
 } from "./metrics.js";
 import {
+  abComparisonValidity,
   buildReport,
   renderAbComparison,
   renderReport,
@@ -185,6 +186,13 @@ export async function runAbEval(options: EvalCliOptions = {}): Promise<void> {
     out: abOutPath(base, "on"),
     stdout: discardStream(),
   });
+  // A degraded or errored arm has near-zero repeated reads and lower call counts
+  // for reasons unrelated to the optimisation, so presenting it as the "better"
+  // arm would be a lie. Fail loudly instead of printing a comparison table.
+  const validity = abComparisonValidity(off, on);
+  if (!validity.valid) {
+    throw new Error(`A/B comparison not evaluable: ${validity.reason}`);
+  }
   stdout.write(renderAbComparison(off, on));
 }
 

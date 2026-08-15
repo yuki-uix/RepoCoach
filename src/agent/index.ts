@@ -29,6 +29,7 @@ export {
 
 export {
   SessionReadCache,
+  carriedContextFixedBytes,
   formatCarriedBlock,
   selectCarryRanges,
 } from "./read-cache.js";

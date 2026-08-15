@@ -45,6 +45,7 @@ export type {
 } from "./judge.js";
 
 export {
+  abComparisonValidity,
   buildReport,
   renderAbComparison,
   renderReport,
