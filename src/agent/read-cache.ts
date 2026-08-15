@@ -23,7 +23,7 @@
  */
 
 import { byteLength } from "./limits.js";
-import { wrapUntrustedContext } from "./data-guard.js";
+import { escapedByteLength, wrapUntrustedContext } from "./data-guard.js";
 
 export interface CachedRange {
   path: string;
@@ -155,6 +155,10 @@ function omittedLine(range: CachedRange): string {
  * top before any content is carried, so the block `formatCarriedBlock` renders
  * is guaranteed to stay within `maxBytes` once wrapped.
  *
+ * Each entry is costed at its *escaped* size — the wrapper escapes markers
+ * inside the path and content, so billing raw bytes would let a hostile file
+ * stuffed with `<<<REPO_DATA_END>>>` inflate past the budget after escaping.
+ *
  * Ordering: ranges the model has cited come first (they are the ones it keeps
  * referring back to), then most-recently-read. Ranges that do not fit are
  * downgraded — they stay listed by path + line range but their content is
@@ -177,7 +181,7 @@ export function selectCarryRanges(
   const omitted: CachedRange[] = [];
   let used = 0;
   for (const range of ordered) {
-    const entryBytes = byteLength(carriedEntry(range));
+    const entryBytes = escapedByteLength(carriedEntry(range));
     // Two separator bytes between carried entries (the "\n\n" in the block).
     const separator = carry.length === 0 ? 0 : 2;
     if (carriedBudget > 0 && used + separator + entryBytes <= carriedBudget) {
@@ -229,7 +233,9 @@ function formatOmittedSection(omitted: readonly CachedRange[]): string {
       break;
     }
     const line = omittedLine(range);
-    const lineBytes = byteLength(line);
+    // The path is repo content, so it is escaped by the wrapper; bill its
+    // escaped size so a marker-laden path cannot inflate the section over cap.
+    const lineBytes = escapedByteLength(line);
     if (used + lineBytes + byteLength(overflowMarker) > OMITTED_SECTION_BYTES) {
       break;
     }
@@ -240,6 +246,43 @@ function formatOmittedSection(omitted: readonly CachedRange[]): string {
   const unlisted = omitted.length - listed;
   const suffix = unlisted > 0 ? `\n… and ${unlisted} more range(s)` : "";
   return `${header}${lines.join("")}${suffix}`;
+}
+
+/** The final, already-wrapped carried block and the ranges it actually carries. */
+export interface BuiltCarriedBlock {
+  /** The UNTRUSTED_DATA-wrapped message, guaranteed ≤ `maxBytes`. */
+  content: string;
+  /** The ranges whose full content landed in context — record exactly these. */
+  carried: CachedRange[];
+}
+
+/**
+ * Build the whole cross-turn carried-context message: select what fits (billed
+ * at escaped size), format it, wrap it in UNTRUSTED_DATA markers, and enforce a
+ * final hard cap on the *wrapped* bytes. The escaped accounting in
+ * `selectCarryRanges` already keeps the wrapped block within `maxBytes`, so this
+ * last loop is a defense-in-depth guarantee that covers any future wrapper prose
+ * or a marker split across the entry separator. If the wrapped block still
+ * overflows, whole entries are dropped from the tail (least valuable) and
+ * downgraded to the path + line list, so the returned `carried` list is exactly
+ * the content the model saw — callers must record only those, never the dropped
+ * tail.
+ */
+export function buildCarriedBlock(
+  ranges: readonly CachedRange[],
+  maxBytes: number,
+): BuiltCarriedBlock {
+  const { carry, omitted } = selectCarryRanges(ranges, maxBytes);
+  let wrapped = wrapUntrustedContext(formatCarriedBlock(carry, omitted), {
+    kind: "already_read",
+  });
+  while (byteLength(wrapped) > maxBytes && carry.length > 0) {
+    omitted.push(carry.pop()!);
+    wrapped = wrapUntrustedContext(formatCarriedBlock(carry, omitted), {
+      kind: "already_read",
+    });
+  }
+  return { content: wrapped, carried: carry };
 }
 
 /** Repo paths are compared as POSIX, regardless of host separator. */

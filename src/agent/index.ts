@@ -29,11 +29,12 @@ export {
 
 export {
   SessionReadCache,
+  buildCarriedBlock,
   carriedContextFixedBytes,
   formatCarriedBlock,
   selectCarryRanges,
 } from "./read-cache.js";
-export type { CachedRange, CarrySelection } from "./read-cache.js";
+export type { BuiltCarriedBlock, CachedRange, CarrySelection } from "./read-cache.js";
 
 export {
   describeJsonSyntaxError,
@@ -68,6 +69,8 @@ export {
   UNTRUSTED_DATA_START,
   UNTRUSTED_DATA_WARNING,
   escapeDataMarkers,
+  escapedByteLength,
+  truncateEscapedBytes,
   wrapRepoData,
   wrapUntrustedContext,
 } from "./data-guard.js";

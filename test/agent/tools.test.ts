@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_TOOL_RESULT_BYTES,
+  REPO_DATA_END,
   SessionReadCache,
   byteLength,
   createToolRegistry,
+  escapedByteLength,
   type Evidence,
   type EvidenceValidator,
   type ReturnRecorder,
@@ -495,6 +497,26 @@ describe("repo_read_file truncation", () => {
     expect(shownLines).toBeGreaterThan(0);
     expect(shownLines).toBeLessThan(100);
     expect(records).toEqual([{ path: "src/big.ts", startLine: 1, endLine: shownLines }]);
+  });
+
+  it("bills a marker-stuffed read by its escaped size so wrapping cannot exceed the cap", async () => {
+    // A file packed with forged END markers inflates once wrapRepoData escapes
+    // it; the tool must bill the escaped size so the result still fits the cap.
+    // Keep the file well under the reader's 512 KiB size limit but far over the
+    // 8 KiB tool-result cap.
+    const hostileLine = REPO_DATA_END.repeat(4);
+    const manyLines = Array.from({ length: 500 }, () => hostileLine).join("\n");
+    const { reader, repo } = makeTempReader({ "src/hostile.ts": `${manyLines}\n` });
+    const registry = createToolRegistry({ reader, repo });
+
+    const result = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/hostile.ts" },
+      collectedEvidence: [],
+    });
+
+    expect(result).toContain("内容已截断");
+    expect(escapedByteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
   });
 });
 

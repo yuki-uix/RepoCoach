@@ -15,6 +15,8 @@
  * escaping discipline to those blocks, sharing the one escaping function.
  */
 
+import { byteLength } from "./limits.js";
+
 export const REPO_DATA_START = "<<<REPO_DATA_START";
 export const REPO_DATA_END = "<<<REPO_DATA_END>>>";
 
@@ -60,6 +62,55 @@ export function escapeDataMarkers(content: string): string {
     .join(ESCAPED_UNTRUSTED_END)
     .split(UNTRUSTED_DATA_START)
     .join(ESCAPED_UNTRUSTED_START);
+}
+
+/** Byte length of `content` after the shared marker escaping is applied. */
+export function escapedByteLength(content: string): number {
+  return byteLength(escapeDataMarkers(content));
+}
+
+/**
+ * Byte-truncate `text` (without splitting a multi-byte character) so its
+ * *escaped* form fits in `maxBytes`. Used where a raw string is measured before
+ * it is later wrapped and escaped: billing raw bytes lets marker-heavy content
+ * inflate past the cap once `escapeDataMarkers` runs. `escapeDataMarkers` only
+ * ever lengthens content, so this returns the longest prefix whose escaped form
+ * fits.
+ */
+export function truncateEscapedBytes(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  if (byteLength(escapeDataMarkers(text)) <= maxBytes) {
+    return { text, truncated: false };
+  }
+  let slice = "";
+  let escaped = 0;
+  for (const ch of text) {
+    const next = slice + ch;
+    const nextBytes = escaped + byteLength(ch) + escapeExpansionDelta(next);
+    if (nextBytes > maxBytes) {
+      break;
+    }
+    slice = next;
+    escaped = nextBytes;
+  }
+  return { text: slice, truncated: true };
+}
+
+/**
+ * Bytes `escapeDataMarkers` adds when a marker completes exactly at the end of
+ * `text`. A marker only expands once complete, and the four escaped stand-ins
+ * contain no further marker, so expansion never cascades across replacements.
+ */
+function escapeExpansionDelta(text: string): number {
+  if (text.endsWith(REPO_DATA_END)) return ESCAPED_REPO_END.length - REPO_DATA_END.length;
+  if (text.endsWith(REPO_DATA_START)) return ESCAPED_REPO_START.length - REPO_DATA_START.length;
+  if (text.endsWith(UNTRUSTED_DATA_END)) return ESCAPED_UNTRUSTED_END.length - UNTRUSTED_DATA_END.length;
+  if (text.endsWith(UNTRUSTED_DATA_START)) {
+    return ESCAPED_UNTRUSTED_START.length - UNTRUSTED_DATA_START.length;
+  }
+  return 0;
 }
 
 /**

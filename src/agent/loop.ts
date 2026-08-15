@@ -22,6 +22,7 @@ import type {
 import type { Repository, Reader } from "../reader/index.js";
 import type { ToolReturnLedger } from "../evidence/ledger.js";
 import {
+  escapedByteLength,
   wrapRepoData,
   wrapUntrustedContext,
   type RepoDataMeta,
@@ -49,11 +50,7 @@ import {
   type EvidenceValidator,
   type ToolRegistry,
 } from "./tools.js";
-import {
-  SessionReadCache,
-  formatCarriedBlock,
-  selectCarryRanges,
-} from "./read-cache.js";
+import { SessionReadCache, buildCarriedBlock } from "./read-cache.js";
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -362,10 +359,9 @@ export class AgentLoop {
     }
     const carried = this.buildCarriedContextBlock(input.turnHistory.length);
     if (carried !== null) {
-      messages.push({
-        role: "user",
-        content: wrapUntrustedContext(carried, { kind: "already_read" }),
-      });
+      // Already UNTRUSTED_DATA-wrapped (and hard-capped) inside the builder, so
+      // it is pushed verbatim rather than wrapped a second time here.
+      messages.push({ role: "user", content: carried });
     }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;
@@ -385,18 +381,15 @@ export class AgentLoop {
     if (!this.carryReadContext || turnIndex === 0 || this.readCache.ranges.length === 0) {
       return null;
     }
-    const { carry, omitted } = selectCarryRanges(
-      this.readCache.ranges,
-      MAX_CARRIED_CONTEXT_BYTES,
-    );
-    // Only the ranges whose content actually landed in context are citable;
-    // the downgraded (content-omitted) ranges must be re-read before citing.
-    for (const range of carry) {
+    const built = buildCarriedBlock(this.readCache.ranges, MAX_CARRIED_CONTEXT_BYTES);
+    // Only the ranges whose content actually landed in context are citable —
+    // `buildCarriedBlock` returns exactly those after its hard cap, so any entry
+    // it dropped is never recorded as carried (the model never saw its content).
+    for (const range of built.carried) {
       this.ledger?.recordCarried(range.path, range.startLine, range.endLine);
     }
-    const block = formatCarriedBlock(carry, omitted);
-    this.emit({ type: "carried_context", bytes: byteLength(block), turnIndex });
-    return block;
+    this.emit({ type: "carried_context", bytes: byteLength(built.content), turnIndex });
+    return built.content;
   }
 
   private async callProvider(
@@ -497,7 +490,10 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   }
   const prefix = "Previous turns:\n";
   const full = `${prefix}${turns.map(formatTurnLine).join("\n")}`;
-  if (byteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
+  // Turn fields are model-generated from repo content, so they are later
+  // escaped by `wrapUntrustedContext`. Bill their escaped size, or marker-heavy
+  // feedback/question text would inflate past the cap after escaping.
+  if (escapedByteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
     return full;
   }
   // Cap the summary: keep the most recent turns in full and collapse the older
@@ -513,11 +509,11 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   while (index >= 0) {
     const line = formatTurnLine(turns[index]!, index);
     const separator = kept.length === 0 ? 0 : 1;
-    if (byteLength(line) + separator + keptBytes > budget) {
+    if (escapedByteLength(line) + separator + keptBytes > budget) {
       break;
     }
     kept.unshift(line);
-    keptBytes += byteLength(line) + separator;
+    keptBytes += escapedByteLength(line) + separator;
     index -= 1;
   }
   const omitted = index + 1;

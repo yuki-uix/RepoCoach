@@ -62,18 +62,25 @@ export function lineNumberPrefix(lineNumber: number): string {
  * must not be citable. `keptLines` is the number of whole lines shown (0 when
  * the first line is truncated), letting the caller record exactly the shown
  * range.
+ *
+ * `measure` sizes each source line and `truncate` cuts an oversized first line;
+ * both default to raw-byte accounting. Pass escaped variants when the result is
+ * later wrapped (and thus escaped) by `wrapRepoData`/`wrapUntrustedContext`, so
+ * marker-heavy lines cannot inflate past the cap after escaping.
  */
 export function fitSourceLines(
   content: string,
   maxBytes: number,
   startLine = 1,
+  measure: (text: string) => number = byteLength,
+  truncate: (text: string, maxBytes: number) => { text: string } = truncateBytes,
 ): { content: string; keptLines: number; truncated: boolean } {
   const lines = content.split("\n");
   const kept: string[] = [];
   let bytes = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const lineBytes = byteLength(lineNumberPrefix(startLine + i)) + byteLength(line);
+    const lineBytes = byteLength(lineNumberPrefix(startLine + i)) + measure(line);
 
     if (i === 0) {
       if (lineBytes <= maxBytes) {
@@ -83,7 +90,7 @@ export function fitSourceLines(
       }
       // The first line alone exceeds the budget: byte-truncate it and report
       // nothing as fully shown, so the model can never cite a partial line.
-      const cut = truncateBytes(
+      const cut = truncate(
         line,
         Math.max(maxBytes - byteLength(lineNumberPrefix(startLine)), 0),
       );
