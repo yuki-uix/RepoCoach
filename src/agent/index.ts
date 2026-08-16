@@ -20,12 +20,16 @@ export type { AgentLoopEvent, AgentLoopOptions } from "./loop.js";
 
 export {
   MAX_CARRIED_CONTEXT_BYTES,
+  MAX_ENTRY_OUTLINE_BYTES,
   MAX_HISTORY_SUMMARY_BYTES,
   MAX_TOOL_RESULT_BYTES,
   byteLength,
   fitSourceLines,
   truncateBytes,
 } from "./limits.js";
+
+export { buildEntryOutline } from "./entry-outline.js";
+export type { EntryOutline } from "./entry-outline.js";
 
 export {
   SessionReadCache,

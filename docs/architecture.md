@@ -20,11 +20,13 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 ### 证据构造性接地
 
-模型不能凭空写出证据引用。`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)，由服务端持有工具返回记录做交集校验。幻觉引用在架构上被拒绝，而不是靠事后评估测量。
+模型不能凭空写出证据引用。`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)，由服务端持有工具返回记录做交集校验。幻觉引用在架构上被拒绝，而不是靠事后评估测量。批量不等于放行（issue #29）：`repo_save_evidence` 接受 `items` 数组一次提交本轮全部证据，但每条仍逐条过同一校验——合格的保存、不合格的在返回值中逐条注明原因，绝不整批放行或整批丢弃。
 
 同一原则也约束功能候选（issue #30）：候选生成出口对照模型输入时 barrel 穿透得到的同一份真实符号与文件集合，校验候选的 `entryFiles` 落在入口候选 / 定义文件内、描述中点名的符号能在这些文件中找到，找不到即丢弃该候选（全部丢弃则回落启发式）。符号抽取沿用既有「代码上下文特征」规则（全大写散文词、语言名、产品名不是符号），避免误伤。
 
 跨轮读缓存（issue #25）扩展了这一语义：Agent Loop 会把上一轮已读的文件范围按字节预算择要携带进下一轮上下文，接地闸同步接受"本轮上下文实际携带"的范围——只认真正带进上下文的那些，被降级为"只列 path 不带内容"的范围不可引用（与截断只记实际显示行是同一纪律）。
+
+首轮入口摘要（issue #29）是又一条"结构信息进上下文"的路径，纪律是相反的：它只给顶层导出符号名与行号、不含实现内容，经 data-guard 包裹并受独立字节上限约束，且**不记入 ledger**——模型看到符号名不等于看到实现，引用前仍需先 `repo_read_file` 那个范围。
 
 ## 2. 逻辑架构
 
@@ -116,6 +118,8 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 - 记录本轮所有工具返回的 (path, 行号范围)，供证据接地校验；
 - 将模型输出解析为 `AgentDecision` 并做 Schema 校验；
 - 跨轮读缓存（issue #25）：`SessionReadCache` 记录本 Session 内经 `repo_read_file` 返回的 (path, 行号范围, 内容)，跨轮存活（与账本的 `resetTurn` 无关）。第 2 轮起组装消息时，把缓存内容按 `MAX_CARRIED_CONTEXT_BYTES`（默认 24 KiB）择要携带进上下文，优先保留最近使用与被引用过的范围，其余只列 path 与行号范围并注明"如需内容请重读"。该区块经 data-guard 包裹（仓库数据永不进 system prompt）。缓存不持久化——resume 后第一轮没有已读上下文，模型会重读，此为接受的取舍。
+- 首轮入口摘要（issue #29）：候选的 `entryFiles` 经 barrel 穿透解析出真实定义符号（复用 PR #30 的 `resolveSymbols`），把顶层导出符号名 + 行号组成结构摘要，仅首轮注入上下文。受 `MAX_ENTRY_OUTLINE_BYTES`（默认 8 KiB）独立上限约束、经 data-guard 包裹；摘要只含符号名与行号、不记入 ledger。
+- 批量证据（issue #29）：`repo_save_evidence` 接受 `items` 数组，一次提交本轮全部证据，把 Hono 上 16 次独立调用合并为约 1 次往返；数组里的每条仍逐条过 `EvidenceValidator`，合格的保存、不合格的在返回值中逐条列出原因。
 
 第一版模型使用 DeepSeek `deepseek-v4-flash`。API Key 从仓库根目录的 `.env.local` 读取（已被 `.env.*` 忽略规则覆盖），只在服务端使用，不进日志。模型调用封装在独立 provider 接口后，保持可替换。
 
@@ -211,6 +215,8 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 - 证据引用有两个出口——`repo_save_evidence` 工具与 `submit_decision.evidence` 字段——两者都必须过 `EvidenceValidator`，且 **grounding validator 在生产组装入口是强制注入项**：`acceptAllEvidence` 仅供单测使用，CLI/API 组装时不注入接地校验即为缺陷；
 - 文件内容有四个出口——read-file、search、tree、**package-info**——四者都必须过 fs-guard 与统一的 filters 谓词（package-info 曾以 `readFileSync` 裸读 `package.json`，符号链接可越界，正是本条规则要抓的形态）；
 - 跨轮读缓存（issue #25）新增一个"文件内容重新进入上下文"的出口：`SessionReadCache` 的内容在下一轮被携带进 prompt 时，必须经 `wrapUntrustedContext` 包裹（仓库数据永不进 system prompt），且接地闸只认**本轮真正携带了内容**的范围——范围在缓存里但本轮被降级为"只列 path 不带内容"的，一律不可引用。
+- 首轮入口摘要（issue #29）新增一条"结构信息进上下文"的路径：同样必须经 data-guard 包裹、受独立字节上限约束，且因为只含符号名与行号、不记入 ledger——这条路径可以引用"符号在哪"却不能引用实现。
+- 批量证据（issue #29）是接地入口的批量形态：数组里的每条仍逐条过 `EvidenceValidator`，不允许整批放行或整批丢弃——批量只减少往返，不放松接地。
 - 新增任何"模型输出进入产品状态"的路径（未来的 recap 生成、UI 展示等）时，先问：这类数据已有的闸在哪，新路径过了吗。
 
 Review checklist：改动引入新的输出/保存路径时，diff 里必须能指出它复用的闸；指不出即打回。

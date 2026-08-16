@@ -100,6 +100,11 @@ describe("eval:mock end to end", () => {
     // The mock reads the 5-step call chain once, then submits 7 decisions.
     expect(report.run.toolCalls).toEqual({ submit_decision: 7, repo_read_file: 5 });
     expect(report.run.repeatedReads).toBe(0);
+    // The mock never calls repo_save_evidence (it cites via submit_decision),
+    // but the first-turn entry outline is preloaded for the fixture candidate.
+    expect(report.run.saveEvidenceCalls).toBe(0);
+    expect(report.run.entryOutlineBytes).toHaveLength(1);
+    expect(report.run.entryOutlineBytes[0]).toBeGreaterThan(0);
     // Carry is on by default, so later turns carry the trace's reads.
     expect(report.run.carriedBytes.length).toBeGreaterThan(0);
     expect(report.run.carriedBytes.reduce((sum, bytes) => sum + bytes, 0)).toBeGreaterThan(0);
@@ -108,6 +113,8 @@ describe("eval:mock end to end", () => {
     expect(outText).toContain("Tool calls");
     expect(outText).toContain("Repeated reads");
     expect(outText).toContain("Carried bytes");
+    expect(outText).toContain("Save evidence calls");
+    expect(outText).toContain("Entry outline bytes");
   });
 
   it("--no-carry reproduces pre-optimisation behaviour: no carried context", async () => {
@@ -125,5 +132,8 @@ describe("eval:mock end to end", () => {
     expect(report.run.toolCalls).toEqual({ submit_decision: 7, repo_read_file: 5 });
     expect(report.run.repeatedReads).toBe(0);
     expect(report.run.carriedBytes).toEqual([]);
+    // The entry outline is independent of the #25 carry switch, so it is still
+    // preloaded on the first turn.
+    expect(report.run.entryOutlineBytes).toHaveLength(1);
   });
 });

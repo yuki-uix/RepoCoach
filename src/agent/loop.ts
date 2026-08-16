@@ -53,6 +53,7 @@ import {
   type ToolRegistry,
 } from "./tools.js";
 import { SessionReadCache, buildCarriedBlock } from "./read-cache.js";
+import { buildEntryOutline, type EntryOutline } from "./entry-outline.js";
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -84,7 +85,8 @@ export type AgentLoopEvent =
       /** 0-based turn index the read happened in. */
       turnIndex: number;
     }
-  | { type: "carried_context"; bytes: number; turnIndex: number };
+  | { type: "carried_context"; bytes: number; turnIndex: number }
+  | { type: "entry_outline"; bytes: number; turnIndex: number };
 
 export interface AgentLoopOptions {
   provider: ChatProvider;
@@ -110,6 +112,14 @@ export interface AgentLoopOptions {
    * measure both arms of the A/B comparison.
    */
   carryReadContext?: boolean;
+  /**
+   * Entry files of the feature being learned (from the selected candidate).
+   * When set, the first turn preloads a byte-capped structure outline of their
+   * top-level exported symbols (names + line numbers) so the model can locate
+   * symbols without exploratory searches (issue #29). The outline is
+   * data-guard-wrapped and never recorded into the ledger.
+   */
+  entryFiles?: string[];
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -177,11 +187,16 @@ export class AgentLoop {
   private readonly ledger?: ToolReturnLedger;
   private readonly readCache: SessionReadCache;
   private readonly carryReadContext: boolean;
+  private readonly entryFiles?: string[];
+  private readonly reader: Reader;
+  private readonly repo: Repository;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
   /** 0-based turn index of the invoke currently running (set at invoke start). */
   private currentTurnIndex = 0;
+  /** Memoized first-turn entry outline; built lazily once per loop instance. */
+  private entryOutline: Promise<EntryOutline | null> | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -189,6 +204,9 @@ export class AgentLoop {
     this.ledger = options.ledger;
     this.readCache = options.readCache ?? new SessionReadCache();
     this.carryReadContext = options.carryReadContext ?? true;
+    this.entryFiles = options.entryFiles;
+    this.reader = options.reader;
+    this.repo = options.repo;
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
@@ -221,7 +239,7 @@ export class AgentLoop {
     this.evidenceValidator?.setTurnIndex?.(input.turnHistory.length);
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     const collectedEvidence: Evidence[] = [];
-    const messages = this.buildInitialMessages(input);
+    const messages = await this.buildInitialMessages(input);
 
     let decisionRetries = 0;
     let forceMessageAdded = false;
@@ -362,7 +380,7 @@ export class AgentLoop {
     );
   }
 
-  private buildInitialMessages(input: AgentInvokerInput): ChatMessage[] {
+  private async buildInitialMessages(input: AgentInvokerInput): Promise<ChatMessage[]> {
     const messages: ChatMessage[] = [
       { role: "system", content: buildSystemPrompt(input.phase, input.featureGoal) },
     ];
@@ -376,6 +394,17 @@ export class AgentLoop {
         content: wrapUntrustedContext(history, { kind: "turn_history" }),
       });
     }
+    // First turn only: preload a structural outline of the candidate's entry
+    // files so the model locates symbols without exploratory searches (issue
+    // #29). The block is already UNTRUSTED_DATA-wrapped (and hard-capped at
+    // MAX_ENTRY_OUTLINE_BYTES) inside the builder, so it is pushed verbatim.
+    if (input.turnHistory.length === 0) {
+      const outline = await this.entryOutlineBlock();
+      if (outline !== null) {
+        messages.push({ role: "user", content: outline.content });
+        this.emit({ type: "entry_outline", bytes: outline.bytes, turnIndex: 0 });
+      }
+    }
     const carried = this.buildCarriedContextBlock(input.turnHistory.length);
     if (carried !== null) {
       // Already UNTRUSTED_DATA-wrapped (and hard-capped) inside the builder, so
@@ -384,6 +413,25 @@ export class AgentLoop {
     }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;
+  }
+
+  /**
+   * Build (and memoize) the first-turn entry outline. Returns null when no
+   * entry files are configured or none resolve to exported symbols. An outline
+   * failure is non-fatal — it is a navigation aid, never a requirement — so the
+   * builder's own per-file error handling plus this catch keeps it from ever
+   * aborting a turn.
+   */
+  private entryOutlineBlock(): Promise<EntryOutline | null> {
+    if (this.entryFiles === undefined || this.entryFiles.length === 0) {
+      return Promise.resolve(null);
+    }
+    if (this.entryOutline === undefined) {
+      this.entryOutline = buildEntryOutline(this.reader, this.repo, this.entryFiles).catch(
+        () => null,
+      );
+    }
+    return this.entryOutline;
   }
 
   /**

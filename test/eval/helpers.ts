@@ -29,6 +29,8 @@ export function makeEvalRun(overrides: Partial<EvalRun> = {}): EvalRun {
     toolCalls: {},
     repeatedReads: 0,
     carriedBytes: [],
+    saveEvidenceCalls: 0,
+    entryOutlineBytes: [],
     ...overrides,
   };
 }

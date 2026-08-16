@@ -842,3 +842,83 @@ describe("AgentLoop final message cap", () => {
     expect(carriedMessage?.content).toContain("content omitted");
   });
 });
+
+describe("AgentLoop entry outline", () => {
+  it("injects a data-guarded outline on the first turn and never grounds its ranges", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({ ledger, store, sessionId: "s1" });
+    const cited = { path: "src/index.ts", startLine: 1, endLine: 3, reason: "add" };
+
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage(
+        "t",
+        "submit_decision",
+        JSON.stringify({ evidence: [cited], assessment: "correct", nextAction: "show_evidence" }),
+      ),
+    );
+    const loop = new AgentLoop({
+      provider,
+      reader,
+      repo,
+      evidenceValidator: validator,
+      ledger,
+      entryFiles: ["src/index.ts"],
+    });
+
+    // The outline names `add` at line 1, but names + line numbers are not
+    // implementation, so citing that range without reading it is still rejected.
+    await expect(
+      loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    expect(ledger.isGrounded(cited)).toBe(false);
+    expect(store.listBySession("s1")).toEqual([]);
+
+    const outline = requests[0].messages.find((m) =>
+      (m.content ?? "").includes("kind=entry_outline"),
+    );
+    expect(outline?.content).toContain("add (function, line 1)");
+    expect(outline?.content).not.toContain("return a + b");
+    expect(outline?.content).toContain(UNTRUSTED_DATA_START);
+    expect(outline?.content).toContain(UNTRUSTED_DATA_END);
+  });
+
+  it("injects the outline only on the first turn", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const priorTurn: LearningTurn = {
+      sessionId: "s1",
+      question: "Where does it start?",
+      userAnswer: "index.ts",
+      evidence: [],
+      assessment: "correct",
+    };
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage("t", "submit_decision", DECISION),
+    );
+    const loop = new AgentLoop({ provider, reader, repo, entryFiles: ["src/index.ts"] });
+
+    await loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [priorTurn] });
+
+    const outline = requests[0].messages.some((m) =>
+      (m.content ?? "").includes("kind=entry_outline"),
+    );
+    expect(outline).toBe(false);
+  });
+
+  it("does not inject an outline when no entryFiles are configured", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const { provider, requests } = scriptedProvider(() =>
+      toolMessage("t", "submit_decision", DECISION),
+    );
+    const loop = new AgentLoop({ provider, reader, repo });
+
+    await loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [] });
+
+    const outline = requests[0].messages.some((m) =>
+      (m.content ?? "").includes("kind=entry_outline"),
+    );
+    expect(outline).toBe(false);
+  });
+});

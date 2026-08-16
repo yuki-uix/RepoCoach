@@ -235,7 +235,8 @@ describe("repo_save_evidence", () => {
       args: { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
       collectedEvidence: collected,
     });
-    expect(result).toContain("Error: evidence rejected: not grounded");
+    expect(result).toContain("Saved evidence: 0 accepted, 1 rejected.");
+    expect(result).toContain("rejected src/index.ts lines 1-3: not grounded");
     expect(collected).toHaveLength(0);
   });
 
@@ -261,7 +262,7 @@ describe("repo_save_evidence", () => {
     expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
   });
 
-  it("byte-caps a rejected-evidence error string", async () => {
+  it("byte-caps a rejected-evidence receipt", async () => {
     const rejecting: EvidenceValidator = {
       validate: () => ({ ok: false, reason: "x".repeat(20_000) }),
     };
@@ -271,7 +272,80 @@ describe("repo_save_evidence", () => {
       args: { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
       collectedEvidence: [],
     });
-    expect(result).toContain("Error: evidence rejected");
+    expect(result).toContain("Saved evidence: 0 accepted, 1 rejected.");
+    expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+  });
+
+  it("accepts a batch and appends every accepted item", async () => {
+    const { registry, collected } = makeRegistry();
+    const items = [
+      { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
+      { path: "src/util.ts", startLine: 1, endLine: 1, reason: "util" },
+    ];
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: { items },
+      collectedEvidence: collected,
+    });
+    expect(result).toContain("Saved evidence: 2 accepted, 0 rejected.");
+    expect(collected).toEqual(items);
+  });
+
+  it("saves accepted items and reports each rejected item individually", async () => {
+    const selective: EvidenceValidator = {
+      validate: (evidence) =>
+        evidence.path === "src/util.ts"
+          ? { ok: false, reason: "not grounded" }
+          : { ok: true },
+    };
+    const { registry, collected } = makeRegistry(selective);
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: {
+        items: [
+          { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
+          { path: "src/util.ts", startLine: 1, endLine: 1, reason: "util" },
+        ],
+      },
+      collectedEvidence: collected,
+    });
+    expect(result).toContain("Saved evidence: 1 accepted, 1 rejected.");
+    expect(result).toContain("accepted src/index.ts");
+    expect(result).toContain("rejected src/util.ts");
+    expect(result).toContain("not grounded");
+    // The accepted item is kept; the rejected one is not dropped silently but
+    // also never appended.
+    expect(collected).toEqual([
+      { path: "src/index.ts", startLine: 1, endLine: 3, reason: "entry" },
+    ]);
+  });
+
+  it("rejects a batch with no items", async () => {
+    const { registry, collected } = makeRegistry();
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: { items: [] },
+      collectedEvidence: collected,
+    });
+    expect(result).toContain("Error: invalid evidence");
+    expect(collected).toHaveLength(0);
+  });
+
+  it("byte-caps a batch receipt with many oversized reasons", async () => {
+    const { registry } = makeRegistry();
+    const items = Array.from({ length: 200 }, (_, i) => ({
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 3,
+      reason: `reason-${i}-${"x".repeat(200)}`,
+    }));
+    const result = await registry.execute({
+      name: "repo_save_evidence",
+      args: { items },
+      collectedEvidence: [],
+    });
+    expect(result).toContain("Saved evidence");
+    expect(result).toContain("结果已截断");
     expect(byteLength(result)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
   });
 });

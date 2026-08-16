@@ -197,6 +197,10 @@ function appendInstrumentation(lines: string[], run: EvalRun): void {
     carriedDetail = `${carried} (no carry)`;
   }
   lines.push(`Carried bytes        ${carriedDetail}${suffix}`);
+
+  lines.push(`Save evidence calls ${run.saveEvidenceCalls}${suffix}`);
+  const outlineBytes = run.entryOutlineBytes.reduce((sum, bytes) => sum + bytes, 0);
+  lines.push(`Entry outline bytes  ${outlineBytes}${suffix}`);
 }
 
 function appendJudgeMode(lines: string[], judge: JudgeResult): void {

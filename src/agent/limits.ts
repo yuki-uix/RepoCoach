@@ -21,6 +21,16 @@ export const MAX_HISTORY_SUMMARY_BYTES = 4 * 1024;
  * number is re-measured once real-model cross-turn savings are known.
  */
 export const MAX_CARRIED_CONTEXT_BYTES = 24 * 1024;
+/**
+ * Maximum bytes of the first-turn entry structure outline (issue #29): a
+ * data-guard-wrapped list of top-level exported symbol names + line numbers for
+ * the candidate's entry files, with no implementation content. It replaces the
+ * exploratory searches a deep library would otherwise need to locate symbols,
+ * so it is an independent budget from the carried-context cap — names + line
+ * numbers are far cheaper than file content, and a generous-but-bounded map is
+ * the whole point.
+ */
+export const MAX_ENTRY_OUTLINE_BYTES = 8 * 1024;
 
 export function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
