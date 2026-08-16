@@ -551,6 +551,21 @@ function buildTurnInstruction(input: AgentInvokerInput): string {
   return "Proceed with the current phase.";
 }
 
+/**
+ * Fixed bytes `wrapUntrustedContext` adds around the turn-history summary (the
+ * header + warning + closing marker scaffolding). The summary is billed against
+ * `MAX_HISTORY_SUMMARY_BYTES` minus this overhead so the *wrapped* message the
+ * loop sends stays within the terminal cap — the same "reserve the wrapper
+ * before fitting the content" discipline the tool results, carried block and
+ * entry outline already follow.
+ */
+const HISTORY_WRAPPER_OVERHEAD = byteLength(
+  wrapUntrustedContext("", { kind: "turn_history" }),
+);
+
+/** Raw-bytes budget for the un-wrapped summary, wrapper overhead already off. */
+const HISTORY_CONTENT_BUDGET = MAX_HISTORY_SUMMARY_BYTES - HISTORY_WRAPPER_OVERHEAD;
+
 export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   if (turns.length === 0) {
     return null;
@@ -559,8 +574,12 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   const full = `${prefix}${turns.map(formatTurnLine).join("\n")}`;
   // Turn fields are model-generated from repo content, so they are later
   // escaped by `wrapUntrustedContext`. Bill their escaped size, or marker-heavy
-  // feedback/question text would inflate past the cap after escaping.
-  if (escapedByteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
+  // feedback/question text would inflate past the cap after escaping — and bill
+  // against the budget that already reserves the wrapper's fixed overhead, so
+  // the *wrapped* message the loop actually sends stays within
+  // MAX_HISTORY_SUMMARY_BYTES (issue #31: this was the one message kind whose
+  // cap covered raw content only, letting the wrapper push it over).
+  if (escapedByteLength(full) <= HISTORY_CONTENT_BUDGET) {
     return full;
   }
   // Cap the summary: keep the most recent turns in full and collapse the older
@@ -569,7 +588,7 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   // `omitted`, so it can never exceed the marker for `turns.length`); without
   // that reservation the marker pushes the joined string over the cap.
   const maxOlderBytes = byteLength(`… ${turns.length} earlier turn(s) omitted (see session file)\n`);
-  const budget = MAX_HISTORY_SUMMARY_BYTES - byteLength(prefix) - maxOlderBytes;
+  const budget = HISTORY_CONTENT_BUDGET - byteLength(prefix) - maxOlderBytes;
   const kept: string[] = [];
   let keptBytes = 0;
   let index = turns.length - 1;

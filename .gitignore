@@ -3,7 +3,7 @@ node_modules/
 out/
 dist/
 build/
-coverage/
+/coverage/
 .turbo/
 
 .env

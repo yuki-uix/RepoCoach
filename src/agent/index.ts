@@ -82,7 +82,7 @@ export {
 } from "./data-guard.js";
 export type { RepoDataMeta, UntrustedContextMeta } from "./data-guard.js";
 
-export { acceptAllEvidence, createToolRegistry } from "./tools.js";
+export { acceptAllEvidence, createToolRegistry, REPO_TOOL_DEFINITIONS } from "./tools.js";
 export type {
   EvidenceValidator,
   ReturnRecorder,

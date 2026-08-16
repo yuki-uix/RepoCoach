@@ -216,6 +216,23 @@ const repoSaveEvidenceTool: ToolDefinition = {
   },
 };
 
+/**
+ * The five repo tool definitions, in registration order. Exported so coverage
+ * tests enumerate the tool exits from the exact same list the registry builds
+ * from — a tool added here is automatically exercised by
+ * `test/coverage/tool-exit-byte-cap.test.ts`, so a new exit can never be missed
+ * by a hand-maintained test array. `submit_decision` is deliberately absent: it
+ * is the loop's terminal tool (its arguments ARE the decision), not a repo tool
+ * returning untrusted data through `capRepoData`.
+ */
+export const REPO_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+  repoGetTreeTool,
+  repoSearchTool,
+  repoReadFileTool,
+  repoGetPackageInfoTool,
+  repoSaveEvidenceTool,
+];
+
 /** Build the tool registry bound to a Reader + Repository pair. */
 export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
   const validator = runtime.evidenceValidator ?? acceptAllEvidence;
@@ -231,13 +248,7 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
   }
 
   return {
-    definitions: [
-      repoGetTreeTool,
-      repoSearchTool,
-      repoReadFileTool,
-      repoGetPackageInfoTool,
-      repoSaveEvidenceTool,
-    ],
+    definitions: [...REPO_TOOL_DEFINITIONS],
     execute,
   };
 }
