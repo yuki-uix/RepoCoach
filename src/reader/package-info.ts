@@ -3,12 +3,14 @@
  *
  * Parses the root `package.json` and returns only names/keys — scripts are
  * never executed, dependencies are never installed. Also resolves the
- * `workspaces` field for monorepo support.
+ * `workspaces` field for monorepo support, merged with the `packages:` list of
+ * a root `pnpm-workspace.yaml` (pnpm monorepos declare members there instead).
  *
  * The read goes through the dual gate (§6): `resolveInRepo` (path containment
  * + realpath) and the readable-path + size filters applied to both the alias
  * and the symlink's real target. Workspaces are only parsed as the strings
- * named in `package.json`; no sub-`package.json` is ever read here.
+ * named in `package.json` / `pnpm-workspace.yaml`; no sub-`package.json` is
+ * ever read here.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -65,7 +67,10 @@ export function getPackageInfo(
     name: typeof pkg.name === "string" ? pkg.name : undefined,
     scripts: objectKeys(pkg.scripts),
     dependencies: collectDependencyKeys(pkg),
-    workspaces: parseWorkspaces(pkg.workspaces),
+    workspaces: dedupe([
+      ...parseWorkspaces(pkg.workspaces),
+      ...readPnpmWorkspacePackages(rootDir, opts),
+    ]),
     entryPoints: extractEntryPoints(pkg),
   };
 }
@@ -152,4 +157,151 @@ function parseWorkspaces(value: unknown): string[] {
     }
   }
   return [];
+}
+
+/**
+ * Read the root `pnpm-workspace.yaml` and return its `packages:` glob list.
+ *
+ * pnpm declares workspace members in `pnpm-workspace.yaml` rather than the root
+ * `package.json` `workspaces` field, so a pnpm monorepo (e.g. Zod) would
+ * otherwise be detected as zero workspaces and fall back to the generic
+ * walkthrough candidate. The read goes through the same dual gate as
+ * `package.json` (§6): `resolveInRepo` + the readable-path and size filters.
+ * The file is optional — a missing file returns `[]` — while a symlink escape,
+ * a secret target or an oversized file is refused exactly like a `package.json`
+ * one. Malformed content degrades to `[]` (see `parsePnpmWorkspacePackages`).
+ */
+function readPnpmWorkspacePackages(
+  rootDir: string,
+  opts?: FileFilterOptions,
+): string[] {
+  const relPath = "pnpm-workspace.yaml";
+  let resolved: string;
+  let realRel: string;
+  try {
+    ({ resolved, realRel } = resolveInRepo(rootDir, relPath));
+  } catch (error) {
+    if (isEnoent(error)) {
+      return []; // no pnpm workspace manifest — not an error
+    }
+    throw error;
+  }
+  const size = statSync(resolved).size;
+
+  if (!isReadablePath(relPath) || !isReadablePath(realRel)) {
+    throw new Error(`File is not readable: ${relPath}`);
+  }
+  if (!isWithinSizeLimit(size, opts?.maxFileSize)) {
+    throw new Error(`File exceeds size limit: ${relPath}`);
+  }
+
+  return parsePnpmWorkspacePackages(readFileSync(resolved, "utf8"));
+}
+
+/**
+ * Parse the `packages:` list of a `pnpm-workspace.yaml` file.
+ *
+ * This is deliberately NOT a general YAML parser — it only recognises the one
+ * shape workspace detection needs: a top-level `packages:` key whose value is
+ * either an inline empty list (`packages: []`) or a block sequence of
+ * `- pattern` items (optionally quoted, with `#` comments, blank lines and any
+ * indentation). Anything else degrades to an empty list rather than throwing:
+ * the file is untrusted repository data and a malformed manifest must never
+ * abort an import.
+ */
+export function parsePnpmWorkspacePackages(content: string): string[] {
+  const lines = content.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (/^packages:\s*\[\s*\]\s*(?:#.*)?$/.test(line)) {
+      return [];
+    }
+    if (/^packages:\s*(?:#.*)?$/.test(line)) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) {
+    return [];
+  }
+
+  const patterns: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) {
+      continue; // blank line or full-line comment
+    }
+    if (!/^\s+-(\s|$)/.test(line)) {
+      break; // first non-item line ends the block
+    }
+    const value = parseListItem(line);
+    if (value !== null) {
+      patterns.push(value);
+    }
+  }
+  return patterns;
+}
+
+/** Extract the scalar of one `- value` sequence item (trailing comment and quotes stripped). */
+function parseListItem(line: string): string | null {
+  const match = line.match(/^\s+-\s*(.*)$/);
+  if (match === null) {
+    return null;
+  }
+  const value = stripComment(match[1] ?? "").trim();
+  return value === "" ? null : unquote(value);
+}
+
+/** Strip a trailing YAML comment (`#`, when preceded by whitespace), quote-aware. */
+function stripComment(value: string): string {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+      }
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(value[i - 1] ?? ""))) {
+      return value.slice(0, i);
+    }
+  }
+  return value;
+}
+
+function unquote(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0]!;
+    const last = value[value.length - 1]!;
+    if (
+      (first === '"' && last === '"') ||
+      (first === "'" && last === "'")
+    ) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function dedupe(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    if (!seen.has(item)) {
+      seen.add(item);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }

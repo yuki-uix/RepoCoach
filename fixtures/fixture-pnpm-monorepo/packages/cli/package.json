@@ -1,0 +1,7 @@
+{
+  "name": "@pnpm-mono/cli",
+  "version": "0.1.0",
+  "bin": {
+    "pnpm-mono": "src/index.ts"
+  }
+}

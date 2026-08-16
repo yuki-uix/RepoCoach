@@ -7,7 +7,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { getPackageInfo } from "../../src/reader/package-info";
+import {
+  getPackageInfo,
+  parsePnpmWorkspacePackages,
+} from "../../src/reader/package-info";
 import { writeFiles } from "./helpers";
 
 const tempDirs: string[] = [];
@@ -113,5 +116,117 @@ describe("getPackageInfo", () => {
     const info = getPackageInfo(root);
     expect(info.name).toBe("linked");
     expect(info.scripts).toEqual(["start"]);
+  });
+
+  it("merges pnpm-workspace.yaml packages with package.json workspaces", () => {
+    const root = makeRoot({
+      "package.json": JSON.stringify({ workspaces: ["apps/*"] }),
+      "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\n",
+    });
+    expect(getPackageInfo(root).workspaces).toEqual(["apps/*", "packages/*"]);
+  });
+
+  it("detects pnpm workspaces when package.json has no workspaces field", () => {
+    const root = makeRoot({
+      "package.json": JSON.stringify({ name: "pnpm" }),
+      "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+    });
+    expect(getPackageInfo(root).workspaces).toEqual(["packages/*"]);
+  });
+
+  it("degrades to an empty list on a malformed pnpm-workspace.yaml", () => {
+    const root = makeRoot({
+      "package.json": JSON.stringify({ name: "pnpm" }),
+      "pnpm-workspace.yaml": "packages:\n  oops\n",
+    });
+    expect(getPackageInfo(root).workspaces).toEqual([]);
+  });
+});
+
+describe("pnpm-workspace.yaml read gate", () => {
+  it("rejects a pnpm-workspace.yaml symlink pointing outside the repo", () => {
+    const root = makeRoot({ "package.json": JSON.stringify({ name: "x" }) });
+    const outside = mkdtempSync(join(tmpdir(), "repocoach-pnpm-outside-"));
+    tempDirs.push(outside);
+    const target = join(outside, "secret.yaml");
+    writeFileSync(target, "packages:\n  - 'top-secret'\n");
+    symlinkSync(target, join(root, "pnpm-workspace.yaml"));
+
+    let message = "";
+    try {
+      getPackageInfo(root);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/escapes repository root/);
+    expect(message).not.toContain("top-secret");
+  });
+
+  it("rejects a pnpm-workspace.yaml symlink whose real target is a secret file", () => {
+    const root = makeRoot({
+      "package.json": JSON.stringify({ name: "x" }),
+      ".env": "SECRET=1\n",
+    });
+    symlinkSync(join(root, ".env"), join(root, "pnpm-workspace.yaml"));
+
+    let message = "";
+    try {
+      getPackageInfo(root);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/not readable/);
+    expect(message).not.toContain(".env");
+  });
+
+  it("rejects an oversized pnpm-workspace.yaml (over 512 KiB)", () => {
+    const big = `packages:\n  - "${"x".repeat(512 * 1024)}"\n`;
+    const root = makeRoot({
+      "package.json": JSON.stringify({ name: "big" }),
+      "pnpm-workspace.yaml": big,
+    });
+    expect(() => getPackageInfo(root)).toThrow(/size limit/);
+  });
+});
+
+describe("parsePnpmWorkspacePackages", () => {
+  it("parses a block list of unquoted patterns", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - apps/*\n"),
+    ).toEqual(["packages/*", "apps/*"]);
+  });
+
+  it("strips single and double quotes", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - 'packages/*'\n  - \"apps/*\"\n"),
+    ).toEqual(["packages/*", "apps/*"]);
+  });
+
+  it("ignores comments, blank lines and arbitrary indentation", () => {
+    expect(
+      parsePnpmWorkspacePackages(
+        "packages:  # the workspace members\n\n  # a comment\n    - packages/*  # trailing\n\n  - \"apps/*\"\n",
+      ),
+    ).toEqual(["packages/*", "apps/*"]);
+  });
+
+  it("returns an empty list for an inline empty packages list", () => {
+    expect(parsePnpmWorkspacePackages("packages: []\n")).toEqual([]);
+    expect(parsePnpmWorkspacePackages("packages: []  # none\n")).toEqual([]);
+  });
+
+  it("stops at the first non-item line after the block", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\ncatalog:\n  zod: ^3\n"),
+    ).toEqual(["packages/*"]);
+  });
+
+  it("returns an empty list for malformed content without throwing", () => {
+    expect(parsePnpmWorkspacePackages("")).toEqual([]);
+    expect(parsePnpmWorkspacePackages("not yaml\n")).toEqual([]);
+    expect(parsePnpmWorkspacePackages("packages:\n  packages/*\n")).toEqual([]);
+    expect(parsePnpmWorkspacePackages("packages:\n  - packages/*\n  -foo\n")).toEqual([
+      "packages/*",
+    ]);
   });
 });

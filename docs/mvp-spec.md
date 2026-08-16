@@ -90,7 +90,7 @@ recap
 - 限制文件数量和总大小；
 - 忽略 `node_modules`、构建产物、二进制和密钥文件；
 - 不执行安装脚本或仓库脚本（克隆只获取文件文本，不运行任何仓库代码）；
-- Monorepo 需先解析 workspaces，功能候选限定在单个 package 内。
+- Monorepo 需先解析 workspaces（`package.json` 的 `workspaces` 字段或根 `pnpm-workspace.yaml` 的 `packages:` 列表），功能候选限定在单个 package 内。
 
 ### 5.2 Feature Trace
 

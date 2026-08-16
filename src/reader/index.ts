@@ -151,7 +151,11 @@ export * from "./filters.js";
 export { getTree } from "./tree.js";
 export { searchRepo } from "./search.js";
 export { readFileSlice } from "./read-file.js";
-export { extractEntryPoints, getPackageInfo } from "./package-info.js";
+export {
+  extractEntryPoints,
+  getPackageInfo,
+  parsePnpmWorkspacePackages,
+} from "./package-info.js";
 export { getRepoMeta } from "./github-meta.js";
 
 export type { ParsedRepoUrl } from "./url.js";

@@ -91,7 +91,7 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 不使用 GitHub Code Search API 做源码检索：它只索引默认分支、无法配合任意 commit SHA、不返回行号、速率限制（10 req/min）撑不起单 Session 的多轮工具调用。克隆只获取文件文本，不执行任何仓库代码，不违反只读边界。
 
-Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `package.json` 的 workspaces 字段，功能候选推荐时限定在单个 package 内。
+Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `package.json` 的 workspaces 字段与根 `pnpm-workspace.yaml` 的 `packages:` 列表（pnpm monorepo 在此声明成员，如 Zod），功能候选推荐时限定在单个 package 内。
 
 ### Learning Orchestrator
 
