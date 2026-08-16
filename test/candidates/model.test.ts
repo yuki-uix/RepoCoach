@@ -233,4 +233,166 @@ describe("ModelCandidateGenerator", () => {
     expect(ids[0]).toBe("dup");
     expect(ids[1]).not.toBe("dup");
   });
+
+  it("rejects change-proposal candidates and falls back to the heuristic", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const changeProposals = JSON.stringify([
+      {
+        id: "n1",
+        title: "Add a base32 string format validator",
+        description: "Add a base32 string format that validates RFC 4648 input.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "n2",
+        title: "Implement a semver validator",
+        description: "Implement semver checking so users can validate versions.",
+        entryFiles: ["src/parse/validate.ts"],
+        difficulty: "intermediate",
+      },
+      {
+        id: "n3",
+        title: "Refactor the store to use a Map",
+        description: "Refactor MemoryStore internals to back the store with a Map.",
+        entryFiles: ["src/store/memory.ts"],
+        difficulty: "advanced",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([changeProposals]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    // Both the attempt and the retry are rejected, so generation falls back.
+    expect(requests).toHaveLength(2);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(featureCandidateSchema.safeParse(candidate).success).toBe(true);
+    }
+    // The fallback is the heuristic, which traces existing chains — never a
+    // "Add X / Implement X" change proposal.
+    expect(
+      candidates.some(
+        (c) =>
+          c.id === "repository-walkthrough" ||
+          c.title.startsWith("Trace") ||
+          c.title.startsWith("Understand"),
+      ),
+    ).toBe(true);
+    expect(
+      candidates.every((c) => !/^(?:add|implement|create|refactor|fix)\b/i.test(c.title)),
+    ).toBe(true);
+  });
+
+  it("drops change proposals but keeps real trace candidates", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const mixed = JSON.stringify([
+      {
+        id: "n1",
+        title: "Add a base32 string format validator",
+        description: "Add a base32 string format that validates RFC 4648 input.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        // Title looks like a trace, but the description asks for a change.
+        id: "n2",
+        title: "Trace the validate function",
+        description: "A semver format should be added to validate version strings.",
+        entryFiles: ["src/parse/validate.ts"],
+        difficulty: "intermediate",
+      },
+      {
+        id: "t1",
+        title: "Trace the createTracker call chain",
+        description:
+          "Follow createTracker as it wires parse, validate, store and render.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([mixed]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    // Only the genuine trace candidate survives; no retry is needed because at
+    // least one usable candidate remained.
+    expect(requests).toHaveLength(1);
+    expect(candidates.map((c) => c.id)).toEqual(["t1"]);
+  });
+
+  it("caps the model output at 3 candidates", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const five = JSON.stringify([
+      {
+        id: "t1",
+        title: "Trace the createTracker call chain",
+        description: "Follow createTracker.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "t2",
+        title: "Trace parseTask",
+        description: "Follow parseTask as it splits the raw string into fields.",
+        entryFiles: ["src/parse/task.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "t3",
+        title: "Trace validate",
+        description: "Follow validate as it rejects invalid tasks.",
+        entryFiles: ["src/parse/validate.ts"],
+        difficulty: "intermediate",
+      },
+      {
+        id: "t4",
+        title: "Trace MemoryStore",
+        description: "Follow MemoryStore.add as it assigns an id and stores.",
+        entryFiles: ["src/store/memory.ts"],
+        difficulty: "intermediate",
+      },
+      {
+        id: "t5",
+        title: "Trace formatTask",
+        description: "Follow formatTask as it renders a stored task.",
+        entryFiles: ["src/render/format.ts"],
+        difficulty: "advanced",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([five]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(candidates).toHaveLength(3);
+    expect(candidates.map((c) => c.id)).toEqual(["t1", "t2", "t3"]);
+  });
 });
