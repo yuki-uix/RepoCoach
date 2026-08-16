@@ -514,4 +514,90 @@ describe("ModelCandidateGenerator", () => {
       expect(featureCandidateSchema.safeParse(candidate).success).toBe(true);
     }
   });
+
+  it("drops a candidate whose title names a fabricated symbol despite a benign description", async () => {
+    const mixed = JSON.stringify([
+      {
+        // The fabricated symbol lives only in the title; the description is
+        // plain prose with no code-shaped token, so grounding must still see it.
+        id: "bad",
+        title: "Trace inventedThing",
+        description: "Understand how the entry point wires the pipeline together.",
+        entryFiles: ["src/a.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "good",
+        title: "Trace alpha",
+        description: "Follow alpha through beta.",
+        entryFiles: ["src/b.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [mixed]);
+
+    expect(requests).toHaveLength(1);
+    expect(candidates.map((c) => c.id)).toEqual(["good"]);
+  });
+
+  it("keeps a candidate whose title and description name only real symbols", async () => {
+    const valid = JSON.stringify([
+      {
+        id: "m1",
+        title: "Trace alpha",
+        description: "Follow alpha as it returns the count through beta.",
+        entryFiles: ["src/a.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [valid]);
+
+    expect(requests).toHaveLength(1);
+    expect(candidates.map((c) => c.id)).toEqual(["m1"]);
+  });
+
+  it("keeps a candidate whose title carries an all-caps prose word", async () => {
+    const valid = JSON.stringify([
+      {
+        // "PARSE" is prose emphasis, not a symbol: the conservative extractor
+        // (issue #27) must not turn it into an ungrounded identifier.
+        id: "m1",
+        title: "Trace the PARSE pipeline",
+        description: "Understand how the entry point routes input.",
+        entryFiles: ["src/a.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [valid]);
+
+    expect(requests).toHaveLength(1);
+    expect(candidates.map((c) => c.id)).toEqual(["m1"]);
+  });
+
+  it("falls back to the heuristic when every candidate's title names a fabricated symbol", async () => {
+    const fabricated = JSON.stringify([
+      {
+        id: "f1",
+        title: "Trace inventedThing",
+        description: "Understand how the entry point wires the pipeline.",
+        entryFiles: ["src/a.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "f2",
+        title: "Trace anotherInvention",
+        description: "Understand how the entry point wires the pipeline.",
+        entryFiles: ["src/b.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [fabricated]);
+
+    // Both titles are code-shaped but undefined, so every model candidate is
+    // dropped and generation falls back to the heuristic (which still yields
+    // candidates tracing the real exported symbols).
+    expect(requests).toHaveLength(2);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.id !== "f1" && c.id !== "f2")).toBe(true);
+  });
 });

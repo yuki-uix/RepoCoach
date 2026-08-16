@@ -138,7 +138,7 @@ const MAX_UNGROUNDED_SYMBOL_RATIO = 0;
  * The grounding check mirrors evidence grounding (docs/architecture.md §1): a
  * candidate may only reference files and symbols the generator actually
  * resolved. Its `entryFiles` must be entry candidates or barrel-penetrated
- * definition files, and every symbol its description names must either be one
+ * definition files, and every symbol its display text names must either be one
  * of those resolved symbols or be findable in those files via the reader. A
  * candidate that fails either check is dropped; when every model candidate is
  * dropped, generation falls back to the heuristic (the existing mechanism).
@@ -171,11 +171,45 @@ async function keepLearningCandidates(
 }
 
 /**
- * Are the symbols a candidate's description names grounded in the resolved set?
- * A known (barrel-penetrated) symbol is grounded by construction. Any other
- * code-shaped symbol must be found, via the reader, in one of the files the
- * candidate is allowed to reference — so a description that invents a step in
- * the chain (`inventedThing`) is rejected rather than followed.
+ * Every string field of a candidate that the learner sees — currently `title`
+ * and `description` — is display text that can name symbols, so grounding must
+ * extract symbols from *all* of them rather than the single field that happens
+ * to carry the riskiest wording. This is the third instance of the same defect
+ * shape in this project (the gate is correct but covers only one of several
+ * fields / exits): the render layer covered evidence.reason but missed path
+ * (#28), the byte cap covered read_file but missed search / package_info (#26),
+ * and this gate covered description but missed title. The fix is therefore to
+ * treat the whole *category* of display fields — derived from
+ * `featureCandidateSchema` — instead of adding `title` beside `description` and
+ * leaving the next new field to the same oversight.
+ *
+ * `id` is excluded: it is a machine slug (the session lookup key) the learner
+ * never reads, not prose that names a step in the chain. `entryFiles` (paths,
+ * checked separately against `allowedFiles`) and `difficulty` (a closed enum)
+ * are not plain strings, so they contribute no text here. A future string field
+ * added to the schema (a `summary`, a `why`) is covered automatically.
+ */
+function candidateDisplayText(candidate: FeatureCandidate): string {
+  const text: string[] = [];
+  for (const [field, type] of Object.entries(featureCandidateSchema.shape)) {
+    if (field === "id" || !(type instanceof z.ZodString)) {
+      continue;
+    }
+    const value = (candidate as Record<string, unknown>)[field];
+    if (typeof value === "string") {
+      text.push(value);
+    }
+  }
+  return text.join("\n");
+}
+
+/**
+ * Are the symbols a candidate's display text names grounded in the resolved
+ * set? A known (barrel-penetrated) symbol is grounded by construction. Any
+ * other code-shaped symbol must be found, via the reader, in one of the files
+ * the candidate is allowed to reference — so a candidate that invents a step in
+ * the chain (`inventedThing`) in its title or description is rejected rather
+ * than followed.
  */
 async function symbolsAreGrounded(
   candidate: FeatureCandidate,
@@ -183,7 +217,7 @@ async function symbolsAreGrounded(
   knownSymbols: string[],
   allowedFiles: Set<string>,
 ): Promise<boolean> {
-  const mentioned = extractSymbolNames(candidate.description, knownSymbols);
+  const mentioned = extractSymbolNames(candidateDisplayText(candidate), knownSymbols);
   if (mentioned.length === 0) {
     return true; // no named symbols — nothing to fabricate
   }
