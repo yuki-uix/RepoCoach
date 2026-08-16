@@ -42,7 +42,7 @@ export function resolveWorkspaces(
 
   const workspaces: WorkspaceInfo[] = [];
   for (const dir of [...packageDirs].sort()) {
-    if (!patterns.some((pattern) => matchesWorkspace(dir, pattern))) {
+    if (!matchesWorkspaceSet(dir, patterns)) {
       continue;
     }
     const summary = readWorkspaceSummary(reader, repo, dir);
@@ -80,17 +80,86 @@ export function matchesWorkspace(dir: string, pattern: string): boolean {
   return globToRegExp(pattern.replace(/^\.\//, "")).test(dir);
 }
 
+/**
+ * Does a directory belong to the workspace set described by `patterns`?
+ *
+ * `workspaces` / `packages:` lists may mix positive globs with `!`-prefixed
+ * exclusions (pnpm, npm and Yarn all support this). The semantics match pnpm:
+ * a directory is a workspace when it matches at least one positive pattern and
+ * is not matched by any exclusion. A list of only exclusions matches nothing —
+ * there is no implicit "everything" base to subtract from — and a directory
+ * matched by no positive pattern is never re-added by an exclusion.
+ */
+export function matchesWorkspaceSet(dir: string, patterns: string[]): boolean {
+  let matched = false;
+  for (const pattern of patterns) {
+    if (!isExclusion(pattern) && matchesWorkspace(dir, pattern)) {
+      matched = true;
+    }
+  }
+  if (!matched) {
+    return false;
+  }
+  for (const pattern of patterns) {
+    if (isExclusion(pattern) && matchesWorkspace(dir, pattern.slice(1))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Is this a `!`-prefixed exclusion pattern (as opposed to a positive glob)? */
+function isExclusion(pattern: string): boolean {
+  return pattern.startsWith("!");
+}
+
+/**
+ * Translate a workspace glob to a path-anchored regular expression.
+ *
+ * `*` and `?` match within a single path segment, while a whole-segment `**`
+ * (globstar) matches zero or more segments. A leading globstar matches zero or
+ * more leading segments, a trailing one matches zero or more trailing
+ * segments, and a middle one matches zero or more segments in between. That
+ * segment-wise globstar is what lets an exclusion pattern (a `test` directory
+ * at any depth) match both a `test` package and its nested subdirectories.
+ */
 function globToRegExp(pattern: string): RegExp {
-  let out = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i]!;
-    if (ch === "*") {
-      if (pattern[i + 1] === "*") {
-        out += ".*";
-        i += 1;
+  const segments = pattern.split("/");
+  let out = "^";
+  let needsSlash = false;
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i]!;
+    if (segment === "**") {
+      if (i === 0 && i === segments.length - 1) {
+        out += ".*"; // `**` alone — matches any path
+        needsSlash = false;
+      } else if (i === 0) {
+        out += "(?:[^/]+/)*"; // leading `**/` — zero or more segments
+        needsSlash = false;
+      } else if (i === segments.length - 1) {
+        out += "(?:/[^/]+)*"; // trailing `/**` — zero or more segments
+        needsSlash = false;
       } else {
-        out += "[^/]*";
+        out += "(?:/[^/]+)*/"; // middle `/**/` — zero or more segments
+        needsSlash = false;
       }
+    } else {
+      if (needsSlash) {
+        out += "/";
+      }
+      out += segmentToRegex(segment);
+      needsSlash = true;
+    }
+  }
+  return new RegExp(`${out}$`);
+}
+
+/** Translate one non-globstar path segment (`*`, `?`, literals, regex metachars escaped). */
+function segmentToRegex(segment: string): string {
+  let out = "";
+  for (const ch of segment) {
+    if (ch === "*") {
+      out += "[^/]*";
     } else if (ch === "?") {
       out += "[^/]";
     } else if (/[.+^${}()|[\]\\]/.test(ch)) {
@@ -99,5 +168,5 @@ function globToRegExp(pattern: string): RegExp {
       out += ch;
     }
   }
-  return new RegExp(`^${out}$`);
+  return out;
 }

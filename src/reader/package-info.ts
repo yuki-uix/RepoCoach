@@ -201,33 +201,66 @@ function readPnpmWorkspacePackages(
 /**
  * Parse the `packages:` list of a `pnpm-workspace.yaml` file.
  *
- * This is deliberately NOT a general YAML parser — it only recognises the one
- * shape workspace detection needs: a top-level `packages:` key whose value is
- * either an inline empty list (`packages: []`) or a block sequence of
- * `- pattern` items (optionally quoted, with `#` comments, blank lines and any
- * indentation). Anything else degrades to an empty list rather than throwing:
- * the file is untrusted repository data and a malformed manifest must never
- * abort an import.
+ * This is deliberately NOT a general YAML parser — it recognises only the
+ * subset of YAML that workspace detection needs, and degrades to an empty list
+ * on anything else rather than throwing (the file is untrusted repository data,
+ * and a malformed manifest must never abort an import).
+ *
+ * Supported forms:
+ * - block sequence:
+ *       packages:
+ *         - packages/*            # unquoted, single- or double-quoted
+ *         - '!packages/test'       # `!` exclusions, quoted or not
+ *   with `#` comments (full-line and trailing), blank lines and arbitrary
+ *   indentation; the block ends at the first non-item line.
+ * - inline flow sequence (single line only):
+ *       packages: ['packages/*', "apps/*"]
+ *       packages: [packages/*, apps/*, ]      # trailing comma allowed
+ *       packages: []                          # empty list
+ *   items may be unquoted, single- or double-quoted, separated by commas and
+ *   arbitrary whitespace; a `#` comment after the closing `]` is allowed.
+ *
+ * NOT supported (degrades to `[]` rather than throwing):
+ * - multi-line flow sequences (`packages: [` with items on following lines);
+ * - `#` comments *inside* the `[...]` brackets;
+ * - anchors, aliases, block scalars, and every other YAML feature.
+ *
+ * This hand-rolled parser exists to avoid a YAML dependency; its remaining
+ * gaps are found one at a time. If a third gap shows up, switch to a
+ * constrained YAML parser instead of patching this one further.
  */
 export function parsePnpmWorkspacePackages(content: string): string[] {
   const lines = content.split(/\r?\n/);
-  let start = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    if (/^packages:\s*\[\s*\]\s*(?:#.*)?$/.test(line)) {
-      return [];
+    const flow = parseFlowSequence(line);
+    if (flow !== null) {
+      return flow; // inline flow sequence (incl. `packages: []`)
     }
     if (/^packages:\s*(?:#.*)?$/.test(line)) {
-      start = i;
-      break;
+      return parseBlockSequence(lines, i + 1);
     }
   }
-  if (start === -1) {
-    return [];
-  }
+  return [];
+}
 
+/** Parse a single-line flow sequence (`packages: [ ... ]`), or null if not one. */
+function parseFlowSequence(line: string): string[] | null {
+  const match = line.match(/^packages:\s*\[(.*)$/);
+  if (match === null) {
+    return null;
+  }
+  const close = findClosingBracket(match[1] ?? "");
+  if (close === -1) {
+    return null; // multi-line flow sequence — unsupported
+  }
+  return splitFlowItems((match[1] ?? "").slice(0, close));
+}
+
+/** Parse the block sequence (`packages:` followed by `- item` lines). */
+function parseBlockSequence(lines: string[], start: number): string[] {
   const patterns: string[] = [];
-  for (let i = start + 1; i < lines.length; i++) {
+  for (let i = start; i < lines.length; i++) {
     const line = lines[i] ?? "";
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) {
@@ -242,6 +275,58 @@ export function parsePnpmWorkspacePackages(content: string): string[] {
     }
   }
   return patterns;
+}
+
+/** Index of the first `]` outside quotes, or -1 (covers multi-line flow). */
+function findClosingBracket(rest: string): number {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i]!;
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+      }
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === "]") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Split a flow sequence's contents by commas (quote-aware), trimming + unquoting items. */
+function splitFlowItems(inner: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) {
+        quote = null;
+      }
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+    } else if (ch === ",") {
+      pushFlowItem(items, current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  pushFlowItem(items, current);
+  return items;
+}
+
+/** Push a trimmed, unquoted, non-empty flow item. */
+function pushFlowItem(items: string[], raw: string): void {
+  const item = unquote(raw.trim());
+  if (item !== "") {
+    items.push(item);
+  }
 }
 
 /** Extract the scalar of one `- value` sequence item (trailing comment and quotes stripped). */

@@ -215,6 +215,69 @@ describe("parsePnpmWorkspacePackages", () => {
     expect(parsePnpmWorkspacePackages("packages: []  # none\n")).toEqual([]);
   });
 
+  it("parses a single-line flow sequence", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages: ['packages/*', \"apps/*\"]\n"),
+    ).toEqual(["packages/*", "apps/*"]);
+    expect(parsePnpmWorkspacePackages("packages: [packages/*, apps/*]\n")).toEqual([
+      "packages/*",
+      "apps/*",
+    ]);
+  });
+
+  it("tolerates a trailing comma and whitespace in a flow sequence", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages: [packages/*, apps/*, ]\n"),
+    ).toEqual(["packages/*", "apps/*"]);
+    expect(
+      parsePnpmWorkspacePackages("packages: [  packages/*  ,  \"apps/*\"  ]\n"),
+    ).toEqual(["packages/*", "apps/*"]);
+  });
+
+  it("tolerates a comment after the closing bracket", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages: ['packages/*']  # members\n"),
+    ).toEqual(["packages/*"]);
+  });
+
+  it("keeps `!` exclusion patterns in block and flow forms, quoted and unquoted", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - '!**/test/**'\n"),
+    ).toEqual(["packages/*", "!**/test/**"]);
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - !**/test/**\n"),
+    ).toEqual(["packages/*", "!**/test/**"]);
+    expect(
+      parsePnpmWorkspacePackages("packages: ['packages/*', \"!**/test/**\"]\n"),
+    ).toEqual(["packages/*", "!**/test/**"]);
+  });
+
+  it("keeps a pure-exclusion list without throwing", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - '!**/test/**'\n"),
+    ).toEqual(["!**/test/**"]);
+    expect(
+      parsePnpmWorkspacePackages("packages: [\"!**/test/**\"]\n"),
+    ).toEqual(["!**/test/**"]);
+  });
+
+  it("degrades to empty for a multi-line flow sequence", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages: [\n  'packages/*',\n  'apps/*'\n]\n"),
+    ).toEqual([]);
+    expect(parsePnpmWorkspacePackages("packages: [\n  - packages/*\n]\n")).toEqual(
+      [],
+    );
+  });
+
+  it("uses the first packages list when block and flow forms are mixed", () => {
+    expect(
+      parsePnpmWorkspacePackages(
+        "packages:\n  - packages/*\n  - apps/*\npackages: [ignored/*]\n",
+      ),
+    ).toEqual(["packages/*", "apps/*"]);
+  });
+
   it("stops at the first non-item line after the block", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - packages/*\ncatalog:\n  zod: ^3\n"),
