@@ -35,6 +35,8 @@ import {
 import { Orchestrator } from "../orchestrator/orchestrator.js";
 import { createReader, type Reader, type Repository } from "../reader/index.js";
 import { JsonSessionStore, type PersistentSessionStore } from "../store/index.js";
+import { HeuristicCandidateGenerator } from "../candidates/heuristic.js";
+import { ModelCandidateGenerator } from "../candidates/model.js";
 import {
   FixtureCandidateProvider,
   GeneratedCandidateProvider,
@@ -121,12 +123,12 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
     deps.reader ?? createReader({ cacheRoot: deps.cacheRoot ?? join(dataDir, "repos") });
   const store = deps.store ?? new JsonSessionStore(dataDir);
   const evidenceStore = deps.evidenceStore ?? new InMemoryEvidenceStore();
-  const candidateProvider = deps.candidateProvider ?? defaultCandidateProvider(reader, repoRoot);
 
-  // `list` never touches the provider, so defer `loadConfig` (and the
+  // `list`/`show` never touch the provider, so defer `loadConfig` (and the
   // `.env.local` read it implies) until something actually asks for it — the
-  // first `buildOrchestrator` or an explicit `provider` access. This keeps
-  // `list` working without an API key.
+  // first `buildOrchestrator`, an explicit `provider` access, or the first
+  // candidate generation for a non-fixture repository. This keeps `list` and
+  // `show` working without an API key.
   let provider: ChatProvider | undefined;
   const getProvider = (): ChatProvider => {
     if (provider === undefined) {
@@ -134,6 +136,9 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
     }
     return provider;
   };
+
+  const candidateProvider =
+    deps.candidateProvider ?? defaultCandidateProvider(reader, repoRoot, getProvider);
 
   return {
     reader,
@@ -192,14 +197,23 @@ function buildDefaultProvider(deps: AssembleDeps, repoRoot: string): ChatProvide
 /**
  * Route candidate generation: a local path at (or under) the `fixture-repo`
  * directory uses the pre-authored fixture candidates; anything else — including
- * `fixture-monorepo` — gets real generation (heuristic by default).
+ * `fixture-monorepo` — gets the model-driven generator, falling back to the
+ * deterministic heuristic when the model fails or returns nothing usable.
+ *
+ * The model generator is constructed lazily, on the first non-fixture
+ * `listCandidates` call, so `list`/`show` (which never call `listCandidates`)
+ * keep working without an API key.
  */
-function defaultCandidateProvider(reader: Reader, repoRoot: string): CandidateProvider {
+function defaultCandidateProvider(
+  reader: Reader,
+  repoRoot: string,
+  getProvider: () => ChatProvider,
+): CandidateProvider {
   const fixture = new FixtureCandidateProvider(
     join(repoRoot, "fixtures", "expectations", "feature-candidates.json"),
   );
-  const generated = new GeneratedCandidateProvider(reader);
   const fixtureRepoRoot = resolve(repoRoot, "fixtures", "fixture-repo");
+  let generated: CandidateProvider | undefined;
   return {
     async listCandidates(repo, scope) {
       if (repo.source.kind === "local") {
@@ -207,6 +221,15 @@ function defaultCandidateProvider(reader: Reader, repoRoot: string): CandidatePr
         if (path === fixtureRepoRoot || path.startsWith(fixtureRepoRoot + sep)) {
           return fixture.listCandidates();
         }
+      }
+      if (generated === undefined) {
+        generated = new GeneratedCandidateProvider(
+          reader,
+          new ModelCandidateGenerator({
+            provider: getProvider(),
+            heuristic: new HeuristicCandidateGenerator(),
+          }),
+        );
       }
       return generated.listCandidates(repo, scope);
     },

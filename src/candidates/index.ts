@@ -89,3 +89,35 @@ export function ensureUniqueCandidateIds(
     return id === candidate.id ? candidate : { ...candidate, id };
   });
 }
+
+/**
+ * Guarantee distinct titles across the final candidate list. Two candidates can
+ * legitimately carry the same title — two files defining a same-named symbol, or
+ * a model returning near-duplicates — and the learner's picker reads titles
+ * first, so identical titles make the choices indistinguishable. A duplicate
+ * title gets its defining entry file appended (or a numeric suffix when the
+ * candidate has no entry file), which keeps the two choices tellable at a
+ * glance.
+ */
+export function disambiguateCandidateTitles(
+  candidates: FeatureCandidate[],
+): FeatureCandidate[] {
+  const seen = new Set<string>();
+  return candidates.map((candidate) => {
+    let title = candidate.title;
+    if (seen.has(title)) {
+      const source = candidate.entryFiles[0];
+      title = source === undefined ? `${candidate.title} #2` : `${candidate.title} (${source})`;
+      let suffix = 2;
+      while (seen.has(title)) {
+        suffix += 1;
+        title =
+          source === undefined
+            ? `${candidate.title} #${suffix}`
+            : `${candidate.title} (${source}) #${suffix}`;
+      }
+    }
+    seen.add(title);
+    return title === candidate.title ? candidate : { ...candidate, title };
+  });
+}
