@@ -131,15 +131,29 @@ describe("getPackageInfo", () => {
       "package.json": JSON.stringify({ name: "pnpm" }),
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
     });
-    expect(getPackageInfo(root).workspaces).toEqual(["packages/*"]);
+    const info = getPackageInfo(root);
+    expect(info.workspaces).toEqual(["packages/*"]);
+    expect(info.warnings).toEqual([]);
   });
 
-  it("degrades to an empty list on a malformed pnpm-workspace.yaml", () => {
+  it("parses a multi-line flow `packages` list in pnpm-workspace.yaml", () => {
+    const root = makeRoot({
+      "package.json": JSON.stringify({ name: "pnpm" }),
+      "pnpm-workspace.yaml": "packages:\n  [\n    'packages/*',\n    'apps/*'\n  ]\n",
+    });
+    const info = getPackageInfo(root);
+    expect(info.workspaces).toEqual(["packages/*", "apps/*"]);
+    expect(info.warnings).toEqual([]);
+  });
+
+  it("degrades to an empty list with a warning on a malformed pnpm-workspace.yaml", () => {
     const root = makeRoot({
       "package.json": JSON.stringify({ name: "pnpm" }),
       "pnpm-workspace.yaml": "packages:\n  oops\n",
     });
-    expect(getPackageInfo(root).workspaces).toEqual([]);
+    const info = getPackageInfo(root);
+    expect(info.workspaces).toEqual([]);
+    expect(info.warnings).toEqual(["pnpm-workspace.yaml `packages` must be a list"]);
   });
 });
 
@@ -193,103 +207,150 @@ describe("parsePnpmWorkspacePackages", () => {
   it("parses a block list of unquoted patterns", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - apps/*\n"),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
   });
 
   it("strips single and double quotes", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - 'packages/*'\n  - \"apps/*\"\n"),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
   });
 
-  it("ignores comments, blank lines and arbitrary indentation", () => {
+  it("ignores comments and blank lines", () => {
     expect(
       parsePnpmWorkspacePackages(
-        "packages:  # the workspace members\n\n  # a comment\n    - packages/*  # trailing\n\n  - \"apps/*\"\n",
+        "packages:  # the workspace members\n\n  # a comment\n  - packages/*  # trailing\n\n  - \"apps/*\"\n",
       ),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
   });
 
   it("returns an empty list for an inline empty packages list", () => {
-    expect(parsePnpmWorkspacePackages("packages: []\n")).toEqual([]);
-    expect(parsePnpmWorkspacePackages("packages: []  # none\n")).toEqual([]);
+    expect(parsePnpmWorkspacePackages("packages: []\n")).toEqual({ packages: [] });
+    expect(parsePnpmWorkspacePackages("packages: []  # none\n")).toEqual({
+      packages: [],
+    });
   });
 
   it("parses a single-line flow sequence", () => {
     expect(
       parsePnpmWorkspacePackages("packages: ['packages/*', \"apps/*\"]\n"),
-    ).toEqual(["packages/*", "apps/*"]);
-    expect(parsePnpmWorkspacePackages("packages: [packages/*, apps/*]\n")).toEqual([
-      "packages/*",
-      "apps/*",
-    ]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
+    expect(parsePnpmWorkspacePackages("packages: [packages/*, apps/*]\n")).toEqual({
+      packages: ["packages/*", "apps/*"],
+    });
   });
 
   it("tolerates a trailing comma and whitespace in a flow sequence", () => {
     expect(
       parsePnpmWorkspacePackages("packages: [packages/*, apps/*, ]\n"),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
     expect(
       parsePnpmWorkspacePackages("packages: [  packages/*  ,  \"apps/*\"  ]\n"),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
   });
 
   it("tolerates a comment after the closing bracket", () => {
     expect(
       parsePnpmWorkspacePackages("packages: ['packages/*']  # members\n"),
-    ).toEqual(["packages/*"]);
+    ).toEqual({ packages: ["packages/*"] });
   });
 
-  it("keeps `!` exclusion patterns in block and flow forms, quoted and unquoted", () => {
+  it("keeps `!` exclusion patterns in block and flow forms, quoted", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - '!**/test/**'\n"),
-    ).toEqual(["packages/*", "!**/test/**"]);
-    expect(
-      parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - !**/test/**\n"),
-    ).toEqual(["packages/*", "!**/test/**"]);
+    ).toEqual({ packages: ["packages/*", "!**/test/**"] });
     expect(
       parsePnpmWorkspacePackages("packages: ['packages/*', \"!**/test/**\"]\n"),
-    ).toEqual(["packages/*", "!**/test/**"]);
+    ).toEqual({ packages: ["packages/*", "!**/test/**"] });
   });
 
   it("keeps a pure-exclusion list without throwing", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - '!**/test/**'\n"),
-    ).toEqual(["!**/test/**"]);
+    ).toEqual({ packages: ["!**/test/**"] });
     expect(
       parsePnpmWorkspacePackages("packages: [\"!**/test/**\"]\n"),
-    ).toEqual(["!**/test/**"]);
+    ).toEqual({ packages: ["!**/test/**"] });
   });
 
-  it("degrades to empty for a multi-line flow sequence", () => {
+  it("drops an unquoted `!` exclusion and warns (it is a YAML tag)", () => {
+    // In YAML, `!` opens a tag, so an unquoted `!**/test/**` is not a pattern.
+    // pnpm requires quoting these; the degradation is surfaced, not silent.
     expect(
-      parsePnpmWorkspacePackages("packages: [\n  'packages/*',\n  'apps/*'\n]\n"),
-    ).toEqual([]);
-    expect(parsePnpmWorkspacePackages("packages: [\n  - packages/*\n]\n")).toEqual(
-      [],
-    );
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\n  - !**/test/**\n"),
+    ).toEqual({
+      packages: ["packages/*"],
+      warning: "pnpm-workspace.yaml `packages` contains entries that are not glob patterns",
+    });
   });
 
-  it("uses the first packages list when block and flow forms are mixed", () => {
+  it("parses a multi-line flow sequence", () => {
     expect(
       parsePnpmWorkspacePackages(
-        "packages:\n  - packages/*\n  - apps/*\npackages: [ignored/*]\n",
+        "packages:\n  [\n    'packages/*',\n    'apps/*'\n  ]\n",
       ),
-    ).toEqual(["packages/*", "apps/*"]);
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
   });
 
-  it("stops at the first non-item line after the block", () => {
+  it("resolves anchors and aliases", () => {
+    expect(
+      parsePnpmWorkspacePackages(
+        "base: &members\n  - packages/*\n  - apps/*\npackages: *members\n",
+      ),
+    ).toEqual({ packages: ["packages/*", "apps/*"] });
+  });
+
+  it("stops reading at a following top-level key", () => {
     expect(
       parsePnpmWorkspacePackages("packages:\n  - packages/*\ncatalog:\n  zod: ^3\n"),
-    ).toEqual(["packages/*"]);
+    ).toEqual({ packages: ["packages/*"] });
   });
 
-  it("returns an empty list for malformed content without throwing", () => {
-    expect(parsePnpmWorkspacePackages("")).toEqual([]);
-    expect(parsePnpmWorkspacePackages("not yaml\n")).toEqual([]);
-    expect(parsePnpmWorkspacePackages("packages:\n  packages/*\n")).toEqual([]);
-    expect(parsePnpmWorkspacePackages("packages:\n  - packages/*\n  -foo\n")).toEqual([
-      "packages/*",
-    ]);
+  it("degrades with a warning on duplicate `packages` keys", () => {
+    expect(
+      parsePnpmWorkspacePackages("packages:\n  - packages/*\npackages: [ignored/*]\n"),
+    ).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml is not valid YAML",
+    });
+  });
+
+  it("degrades with a warning on a non-mapping root", () => {
+    expect(parsePnpmWorkspacePackages("not yaml\n")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml must be a YAML mapping",
+    });
+    expect(parsePnpmWorkspacePackages("")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml must be a YAML mapping",
+    });
+  });
+
+  it("degrades with a warning when `packages` is missing", () => {
+    expect(parsePnpmWorkspacePackages("catalog:\n  zod: ^3\n")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml has no `packages` field",
+    });
+  });
+
+  it("degrades with a warning when `packages` is not a list", () => {
+    expect(parsePnpmWorkspacePackages("packages:\n  packages/*\n")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml `packages` must be a list",
+    });
+  });
+
+  it("treats a flow/block mix as invalid YAML rather than throwing", () => {
+    expect(parsePnpmWorkspacePackages("packages: [\n  - packages/*\n]\n")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml is not valid YAML",
+    });
+  });
+
+  it("degrades with a warning on inconsistent item indentation", () => {
+    expect(parsePnpmWorkspacePackages("packages:\n  - packages/*\n  -foo\n")).toEqual({
+      packages: [],
+      warning: "pnpm-workspace.yaml is not valid YAML",
+    });
   });
 });

@@ -14,6 +14,7 @@
  */
 
 import { readFileSync, statSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import {
   isReadablePath,
   isWithinSizeLimit,
@@ -29,6 +30,8 @@ export interface PackageInfo {
   dependencies: string[];
   /** Workspace globs / package paths (monorepo). */
   workspaces: string[];
+  /** Non-fatal observations, e.g. a malformed pnpm-workspace.yaml that degraded to `[]`. */
+  warnings: string[];
   /**
    * Entry paths named by `main` / `module` / `exports` / `bin`, in priority
    * order. Raw package.json-relative strings (e.g. `./src/index.js`); they are
@@ -63,14 +66,16 @@ export function getPackageInfo(
     throw new Error("package.json is not valid JSON");
   }
 
+  const pnpm = readPnpmWorkspacePackages(rootDir, opts);
   return {
     name: typeof pkg.name === "string" ? pkg.name : undefined,
     scripts: objectKeys(pkg.scripts),
     dependencies: collectDependencyKeys(pkg),
     workspaces: dedupe([
       ...parseWorkspaces(pkg.workspaces),
-      ...readPnpmWorkspacePackages(rootDir, opts),
+      ...pnpm.packages,
     ]),
+    warnings: pnpm.warning === undefined ? [] : [pnpm.warning],
     entryPoints: extractEntryPoints(pkg),
   };
 }
@@ -167,14 +172,15 @@ function parseWorkspaces(value: unknown): string[] {
  * otherwise be detected as zero workspaces and fall back to the generic
  * walkthrough candidate. The read goes through the same dual gate as
  * `package.json` (§6): `resolveInRepo` + the readable-path and size filters.
- * The file is optional — a missing file returns `[]` — while a symlink escape,
- * a secret target or an oversized file is refused exactly like a `package.json`
- * one. Malformed content degrades to `[]` (see `parsePnpmWorkspacePackages`).
+ * The file is optional — a missing file returns an empty list with no warning —
+ * while a symlink escape, a secret target or an oversized file is refused
+ * exactly like a `package.json` one. Malformed content degrades to an empty
+ * list and carries a `warning` (see `parsePnpmWorkspacePackages`).
  */
 function readPnpmWorkspacePackages(
   rootDir: string,
   opts?: FileFilterOptions,
-): string[] {
+): PnpmWorkspacePackages {
   const relPath = "pnpm-workspace.yaml";
   let resolved: string;
   let realRel: string;
@@ -182,7 +188,7 @@ function readPnpmWorkspacePackages(
     ({ resolved, realRel } = resolveInRepo(rootDir, relPath));
   } catch (error) {
     if (isEnoent(error)) {
-      return []; // no pnpm workspace manifest — not an error
+      return { packages: [] }; // no pnpm workspace manifest — not an error
     }
     throw error;
   }
@@ -198,177 +204,65 @@ function readPnpmWorkspacePackages(
   return parsePnpmWorkspacePackages(readFileSync(resolved, "utf8"));
 }
 
+interface PnpmWorkspacePackages {
+  packages: string[];
+  /** Why the manifest degraded to `[]` — a fixed message, never file content. */
+  warning?: string;
+}
+
 /**
  * Parse the `packages:` list of a `pnpm-workspace.yaml` file.
  *
- * This is deliberately NOT a general YAML parser — it recognises only the
- * subset of YAML that workspace detection needs, and degrades to an empty list
- * on anything else rather than throwing (the file is untrusted repository data,
- * and a malformed manifest must never abort an import).
+ * Workspace detection needs only the one `packages` field, so this delegates to
+ * the `yaml` package and reads that single key — the rest of the document is
+ * ignored. A real YAML parser is used instead of a hand-rolled subset because
+ * the subset accumulated three silent gaps in a row (the file being missed
+ * entirely, then single-line flow sequences + `!` exclusions, then multi-line
+ * flow sequences), and each gap made a real monorepo read as "no workspaces".
+ * The `yaml` package covers block and flow sequences, comments, anchors/aliases,
+ * quoted scalars and every other valid form for free, so this function no
+ * longer enumerates "supported" vs "unsupported" shapes.
  *
- * Supported forms:
- * - block sequence:
- *       packages:
- *         - packages/*            # unquoted, single- or double-quoted
- *         - '!packages/test'       # `!` exclusions, quoted or not
- *   with `#` comments (full-line and trailing), blank lines and arbitrary
- *   indentation; the block ends at the first non-item line.
- * - inline flow sequence (single line only):
- *       packages: ['packages/*', "apps/*"]
- *       packages: [packages/*, apps/*, ]      # trailing comma allowed
- *       packages: []                          # empty list
- *   items may be unquoted, single- or double-quoted, separated by commas and
- *   arbitrary whitespace; a `#` comment after the closing `]` is allowed.
- *
- * NOT supported (degrades to `[]` rather than throwing):
- * - multi-line flow sequences (`packages: [` with items on following lines);
- * - `#` comments *inside* the `[...]` brackets;
- * - anchors, aliases, block scalars, and every other YAML feature.
- *
- * This hand-rolled parser exists to avoid a YAML dependency; its remaining
- * gaps are found one at a time. If a third gap shows up, switch to a
- * constrained YAML parser instead of patching this one further.
+ * Failure is safe rather than fatal: the file is untrusted repository data and
+ * a malformed manifest must never abort an import. A YAML syntax error, a
+ * non-mapping root, a missing `packages` field, or a `packages` field that is
+ * not a list all degrade to an empty list and carry a fixed `warning` — never
+ * the parser's error text, which can echo the file's own content.
  */
-export function parsePnpmWorkspacePackages(content: string): string[] {
-  const lines = content.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    const flow = parseFlowSequence(line);
-    if (flow !== null) {
-      return flow; // inline flow sequence (incl. `packages: []`)
-    }
-    if (/^packages:\s*(?:#.*)?$/.test(line)) {
-      return parseBlockSequence(lines, i + 1);
-    }
+export function parsePnpmWorkspacePackages(content: string): PnpmWorkspacePackages {
+  let doc: unknown;
+  try {
+    // `logLevel: "error"` silences non-fatal diagnostics (e.g. "unresolved tag")
+    // but still throws on real syntax errors (duplicate keys, a block sequence
+    // inside a flow sequence), so a malformed manifest degrades to the
+    // `warning` below instead of polluting stderr.
+    doc = parseYaml(content, { logLevel: "error" });
+  } catch {
+    return { packages: [], warning: "pnpm-workspace.yaml is not valid YAML" };
   }
-  return [];
-}
-
-/** Parse a single-line flow sequence (`packages: [ ... ]`), or null if not one. */
-function parseFlowSequence(line: string): string[] | null {
-  const match = line.match(/^packages:\s*\[(.*)$/);
-  if (match === null) {
-    return null;
+  if (!isRecord(doc)) {
+    return { packages: [], warning: "pnpm-workspace.yaml must be a YAML mapping" };
   }
-  const close = findClosingBracket(match[1] ?? "");
-  if (close === -1) {
-    return null; // multi-line flow sequence — unsupported
+  const packages = doc.packages;
+  if (packages === undefined) {
+    return { packages: [], warning: "pnpm-workspace.yaml has no `packages` field" };
   }
-  return splitFlowItems((match[1] ?? "").slice(0, close));
-}
-
-/** Parse the block sequence (`packages:` followed by `- item` lines). */
-function parseBlockSequence(lines: string[], start: number): string[] {
-  const patterns: string[] = [];
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) {
-      continue; // blank line or full-line comment
-    }
-    if (!/^\s+-(\s|$)/.test(line)) {
-      break; // first non-item line ends the block
-    }
-    const value = parseListItem(line);
-    if (value !== null) {
-      patterns.push(value);
-    }
+  if (!Array.isArray(packages)) {
+    return { packages: [], warning: "pnpm-workspace.yaml `packages` must be a list" };
   }
-  return patterns;
-}
-
-/** Index of the first `]` outside quotes, or -1 (covers multi-line flow). */
-function findClosingBracket(rest: string): number {
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < rest.length; i++) {
-    const ch = rest[i]!;
-    if (quote !== null) {
-      if (ch === quote) {
-        quote = null;
-      }
-    } else if (ch === "'" || ch === '"') {
-      quote = ch;
-    } else if (ch === "]") {
-      return i;
-    }
+  // Only non-empty string globs are usable. Non-string entries (and the empty
+  // string an unquoted `!` tag resolves to) are dropped — with a warning rather
+  // than silently, so a negated pattern the author forgot to quote is visible.
+  const globs = packages.filter(
+    (item): item is string => typeof item === "string" && item !== "",
+  );
+  if (globs.length !== packages.length) {
+    return {
+      packages: globs,
+      warning: "pnpm-workspace.yaml `packages` contains entries that are not glob patterns",
+    };
   }
-  return -1;
-}
-
-/** Split a flow sequence's contents by commas (quote-aware), trimming + unquoting items. */
-function splitFlowItems(inner: string): string[] {
-  const items: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < inner.length; i++) {
-    const ch = inner[i]!;
-    if (quote !== null) {
-      current += ch;
-      if (ch === quote) {
-        quote = null;
-      }
-    } else if (ch === "'" || ch === '"') {
-      quote = ch;
-      current += ch;
-    } else if (ch === ",") {
-      pushFlowItem(items, current);
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  pushFlowItem(items, current);
-  return items;
-}
-
-/** Push a trimmed, unquoted, non-empty flow item. */
-function pushFlowItem(items: string[], raw: string): void {
-  const item = unquote(raw.trim());
-  if (item !== "") {
-    items.push(item);
-  }
-}
-
-/** Extract the scalar of one `- value` sequence item (trailing comment and quotes stripped). */
-function parseListItem(line: string): string | null {
-  const match = line.match(/^\s+-\s*(.*)$/);
-  if (match === null) {
-    return null;
-  }
-  const value = stripComment(match[1] ?? "").trim();
-  return value === "" ? null : unquote(value);
-}
-
-/** Strip a trailing YAML comment (`#`, when preceded by whitespace), quote-aware. */
-function stripComment(value: string): string {
-  let quote: "'" | '"' | null = null;
-  for (let i = 0; i < value.length; i++) {
-    const ch = value[i]!;
-    if (quote !== null) {
-      if (ch === quote) {
-        quote = null;
-      }
-    } else if (ch === "'" || ch === '"') {
-      quote = ch;
-    } else if (ch === "#" && (i === 0 || /\s/.test(value[i - 1] ?? ""))) {
-      return value.slice(0, i);
-    }
-  }
-  return value;
-}
-
-function unquote(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0]!;
-    const last = value[value.length - 1]!;
-    if (
-      (first === '"' && last === '"') ||
-      (first === "'" && last === "'")
-    ) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
+  return { packages: globs };
 }
 
 function dedupe(items: string[]): string[] {

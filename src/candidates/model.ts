@@ -12,8 +12,10 @@
  * candidate must trace a call chain that already exists in the repository
  * (learn how it works), never propose a new feature / refactor / bug fix /
  * TODO. Because the prompt is soft guidance, the parsed output also passes a
- * conservative `isChangeProposal` guard and a 3-candidate cap (mvp-spec §5.2)
- * before the shared schema/tree/id/title gates.
+ * conservative `isChangeProposal` guard, a constructive grounding check
+ * (entry files and named symbols must match the real definitions the model was
+ * handed) and a 3-candidate cap (mvp-spec §5.2) before the shared
+ * schema/tree/id/title gates.
  */
 
 import { z } from "zod";
@@ -25,7 +27,16 @@ import {
   type ChatMessage,
   type ChatProvider,
 } from "../agent/index.js";
-import type { PackageInfo, Repository, TreeEntry } from "../reader/index.js";
+import {
+  escapeRegExp,
+  extractSymbolNames,
+  SOURCE_FILE_RE,
+} from "../reader/index.js";
+import type {
+  PackageInfo,
+  Reader,
+  Repository,
+} from "../reader/index.js";
 import { HeuristicCandidateGenerator, type ResolvedSymbol } from "./heuristic.js";
 import {
   disambiguateCandidateTitles,
@@ -109,17 +120,100 @@ function isChangeProposal(candidate: FeatureCandidate): boolean {
 }
 
 /**
- * The model exit passes through the same anti-hallucination gate as the
- * heuristic (`filterCandidatesToTree`), plus the kind guard and the candidate
- * cap, before the shared id/title disambiguation.
+ * A candidate is dropped when more than this fraction of its named symbols is
+ * ungrounded. Zero means "any fabricated symbol drops the candidate": a call
+ * chain that names even one symbol the repository does not define leads the
+ * learner down a dead end, and the conservative `extractSymbolNames` already
+ * filters prose words, so a legitimately-grounded candidate names only real
+ * symbols.
  */
-function keepLearningCandidates(
+const MAX_UNGROUNDED_SYMBOL_RATIO = 0;
+
+/**
+ * The model exit passes through the same anti-hallucination gate as the
+ * heuristic (`filterCandidatesToTree`), plus the kind guard, a constructive
+ * grounding check and the candidate cap, before the shared id/title
+ * disambiguation.
+ *
+ * The grounding check mirrors evidence grounding (docs/architecture.md §1): a
+ * candidate may only reference files and symbols the generator actually
+ * resolved. Its `entryFiles` must be entry candidates or barrel-penetrated
+ * definition files, and every symbol its description names must either be one
+ * of those resolved symbols or be findable in those files via the reader. A
+ * candidate that fails either check is dropped; when every model candidate is
+ * dropped, generation falls back to the heuristic (the existing mechanism).
+ */
+async function keepLearningCandidates(
   candidates: FeatureCandidate[],
-  tree: TreeEntry[],
-): FeatureCandidate[] {
-  return filterCandidatesToTree(candidates, tree)
-    .filter((candidate) => !isChangeProposal(candidate))
-    .slice(0, MAX_MODEL_CANDIDATES);
+  input: CandidateGeneratorInput,
+  resolvedSymbols: ResolvedSymbol[],
+): Promise<FeatureCandidate[]> {
+  const allowedFiles = new Set([
+    ...input.entryCandidates,
+    ...resolvedSymbols.map((symbol) => symbol.file),
+  ]);
+  const knownSymbols = resolvedSymbols.map((symbol) => symbol.symbol.name);
+
+  const kept: FeatureCandidate[] = [];
+  for (const candidate of filterCandidatesToTree(candidates, input.tree)) {
+    if (isChangeProposal(candidate)) {
+      continue;
+    }
+    if (!candidate.entryFiles.every((path) => allowedFiles.has(path))) {
+      continue;
+    }
+    if (!(await symbolsAreGrounded(candidate, input, knownSymbols, allowedFiles))) {
+      continue;
+    }
+    kept.push(candidate);
+  }
+  return kept.slice(0, MAX_MODEL_CANDIDATES);
+}
+
+/**
+ * Are the symbols a candidate's description names grounded in the resolved set?
+ * A known (barrel-penetrated) symbol is grounded by construction. Any other
+ * code-shaped symbol must be found, via the reader, in one of the files the
+ * candidate is allowed to reference — so a description that invents a step in
+ * the chain (`inventedThing`) is rejected rather than followed.
+ */
+async function symbolsAreGrounded(
+  candidate: FeatureCandidate,
+  input: CandidateGeneratorInput,
+  knownSymbols: string[],
+  allowedFiles: Set<string>,
+): Promise<boolean> {
+  const mentioned = extractSymbolNames(candidate.description, knownSymbols);
+  if (mentioned.length === 0) {
+    return true; // no named symbols — nothing to fabricate
+  }
+  let missing = 0;
+  for (const symbol of mentioned) {
+    if (knownSymbols.includes(symbol)) {
+      continue;
+    }
+    if (await symbolInAllowedFiles(input.reader, input.repo, symbol, allowedFiles)) {
+      continue;
+    }
+    missing += 1;
+  }
+  return missing / mentioned.length <= MAX_UNGROUNDED_SYMBOL_RATIO;
+}
+
+/** Is `symbol` defined in (or a file path naming) one of the allowed files? */
+async function symbolInAllowedFiles(
+  reader: Reader,
+  repo: Repository,
+  symbol: string,
+  allowedFiles: Set<string>,
+): Promise<boolean> {
+  if (SOURCE_FILE_RE.test(symbol)) {
+    // A file-path token is grounded by naming an allowed file, not by content.
+    const normalized = symbol.replace(/^\.\/+/, "").split("\\").join("/");
+    return allowedFiles.has(normalized);
+  }
+  const matches = await reader.search(repo, escapeRegExp(symbol));
+  return matches.some((match) => allowedFiles.has(match.path));
 }
 
 export interface ModelCandidateGeneratorOptions {
@@ -165,7 +259,7 @@ export class ModelCandidateGenerator implements CandidateGenerator {
 
       const candidates = parseModelCandidates(result.message.content);
       if (candidates !== null) {
-        const kept = keepLearningCandidates(candidates, input.tree);
+        const kept = await keepLearningCandidates(candidates, input, resolvedSymbols);
         if (kept.length > 0) {
           return disambiguateCandidateTitles(ensureUniqueCandidateIds(kept));
         }

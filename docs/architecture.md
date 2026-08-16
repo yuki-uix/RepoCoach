@@ -22,6 +22,8 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 模型不能凭空写出证据引用。`repo_save_evidence` 只接受本轮 `repo_read_file` / `repo_search` 实际返回过的 (path, 行号范围)，由服务端持有工具返回记录做交集校验。幻觉引用在架构上被拒绝，而不是靠事后评估测量。
 
+同一原则也约束功能候选（issue #30）：候选生成出口对照模型输入时 barrel 穿透得到的同一份真实符号与文件集合，校验候选的 `entryFiles` 落在入口候选 / 定义文件内、描述中点名的符号能在这些文件中找到，找不到即丢弃该候选（全部丢弃则回落启发式）。符号抽取沿用既有「代码上下文特征」规则（全大写散文词、语言名、产品名不是符号），避免误伤。
+
 跨轮读缓存（issue #25）扩展了这一语义：Agent Loop 会把上一轮已读的文件范围按字节预算择要携带进下一轮上下文，接地闸同步接受"本轮上下文实际携带"的范围——只认真正带进上下文的那些，被降级为"只列 path 不带内容"的范围不可引用（与截断只记实际显示行是同一纪律）。
 
 ## 2. 逻辑架构
@@ -91,7 +93,7 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 不使用 GitHub Code Search API 做源码检索：它只索引默认分支、无法配合任意 commit SHA、不返回行号、速率限制（10 req/min）撑不起单 Session 的多轮工具调用。克隆只获取文件文本，不执行任何仓库代码，不违反只读边界。
 
-Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `package.json` 的 workspaces 字段与根 `pnpm-workspace.yaml` 的 `packages:` 列表（pnpm monorepo 在此声明成员，如 Zod），功能候选推荐时限定在单个 package 内。
+Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `package.json` 的 workspaces 字段与根 `pnpm-workspace.yaml` 的 `packages:` 列表（pnpm monorepo 在此声明成员，如 Zod），功能候选推荐时限定在单个 package 内。`pnpm-workspace.yaml` 用 `yaml` 包（零依赖）解析且只取 `packages` 字段；解析失败、字段缺失或类型不符时安全降级为空列表并记录一条可见告警（不静默）。
 
 ### Learning Orchestrator
 

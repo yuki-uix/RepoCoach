@@ -156,6 +156,12 @@ export {
   getPackageInfo,
   parsePnpmWorkspacePackages,
 } from "./package-info.js";
+export {
+  SOURCE_FILE_RE,
+  escapeRegExp,
+  extractSymbolNames,
+  wordIn,
+} from "./symbols.js";
 export { getRepoMeta } from "./github-meta.js";
 
 export type { ParsedRepoUrl } from "./url.js";

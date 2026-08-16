@@ -49,6 +49,9 @@ export function buildRepositoryImport(
   }
 
   const pkg = readRootPackage(reader, repo);
+  if (pkg.info !== null) {
+    warnings.push(...pkg.info.warnings);
+  }
   const entryCandidates = resolveEntryCandidates(
     pkg.info?.entryPoints ?? [],
     tree,

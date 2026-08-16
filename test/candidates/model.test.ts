@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,7 @@ import {
   type ChatProvider,
 } from "../../src/agent";
 import { ModelCandidateGenerator } from "../../src/candidates/model";
-import { featureCandidateSchema } from "../../src/domain";
+import { featureCandidateSchema, type FeatureCandidate } from "../../src/domain";
 import { buildRepositoryImport } from "../../src/import";
 import { createReader, type Reader } from "../../src/reader";
 
@@ -30,6 +30,59 @@ function makeReader(): Reader {
   tempDirs.push(cacheRoot);
   return createReader({ cacheRoot });
 }
+
+function pkg(main: string): string {
+  return JSON.stringify({ name: "barrel", version: "0.1.0", main });
+}
+
+/** Write a repo file map (rel path → content) into a fresh temp directory. */
+function writeRepoFiles(dir: string, files: Record<string, string>): void {
+  for (const [rel, content] of Object.entries(files)) {
+    const full = join(dir, rel);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content, "utf8");
+  }
+}
+
+/** Import a temp repo described by `files` and run the model generator over it. */
+async function generateForFiles(
+  files: Record<string, string>,
+  contents: Array<string | null>,
+): Promise<{ requests: ChatCompletionRequest[]; candidates: FeatureCandidate[] }> {
+  const reader = makeReader();
+  const dir = mkdtempSync(join(tmpdir(), "repocoach-model-tmp-"));
+  tempDirs.push(dir);
+  writeRepoFiles(dir, files);
+  const repo = await reader.importRepository(dir);
+  const imp = buildRepositoryImport(reader, repo);
+
+  const { provider, requests } = recordingProvider(contents);
+  const generator = new ModelCandidateGenerator({ provider });
+  const candidates = await generator.generate({
+    reader,
+    repo,
+    tree: imp.tree,
+    entryCandidates: imp.entryCandidates,
+    packageInfo: imp.packageInfo,
+  });
+  return { requests, candidates };
+}
+
+/** A repo whose entry barrel re-exports five distinct real symbols. */
+const BARREL_FILES: Record<string, string> = {
+  "package.json": pkg("src/index.ts"),
+  "src/index.ts":
+    'export * from "./a.js";\n' +
+    'export * from "./b.js";\n' +
+    'export * from "./c.js";\n' +
+    'export * from "./d.js";\n' +
+    'export * from "./e.js";\n',
+  "src/a.ts": "export function alpha(): number { return 1; }\n",
+  "src/b.ts": "export function beta(): number { return 2; }\n",
+  "src/c.ts": "export function gamma(): number { return 3; }\n",
+  "src/d.ts": "export function delta(): number { return 4; }\n",
+  "src/e.ts": "export function epsilon(): number { return 5; }\n",
+};
 
 /** A provider that replays `contents` and records every request it received. */
 function recordingProvider(
@@ -155,74 +208,50 @@ describe("ModelCandidateGenerator", () => {
   });
 
   it("disambiguates duplicate titles from the model", async () => {
-    const reader = makeReader();
-    const repo = await reader.importRepository(fixtureRoot);
-    const imp = buildRepositoryImport(reader, repo);
-
     const dupes = JSON.stringify([
       {
         id: "t1",
-        title: "Trace the string call chain",
-        description: "d",
-        entryFiles: ["src/index.ts"],
+        title: "Trace the number call chain",
+        description: "Follow alpha.",
+        entryFiles: ["src/a.ts"],
         difficulty: "intro",
       },
       {
         id: "t2",
-        title: "Trace the string call chain",
-        description: "d",
-        entryFiles: ["src/parse/validate.ts"],
-        difficulty: "intermediate",
+        title: "Trace the number call chain",
+        description: "Follow beta.",
+        entryFiles: ["src/b.ts"],
+        difficulty: "intro",
       },
     ]);
-    const { provider, requests } = recordingProvider([dupes]);
-    const generator = new ModelCandidateGenerator({ provider });
-    const candidates = await generator.generate({
-      reader,
-      repo,
-      tree: imp.tree,
-      entryCandidates: imp.entryCandidates,
-      packageInfo: imp.packageInfo,
-    });
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [dupes]);
 
     expect(requests).toHaveLength(1);
     expect(candidates).toHaveLength(2);
     const titles = candidates.map((candidate) => candidate.title);
     expect(new Set(titles).size).toBe(titles.length);
     // The duplicate carries its defining file so the two choices are tellable.
-    expect(titles.some((title) => title.includes("src/parse/validate.ts"))).toBe(true);
+    expect(titles.some((title) => title.includes("src/b.ts"))).toBe(true);
   });
 
   it("disambiguates duplicate ids from the model", async () => {
-    const reader = makeReader();
-    const repo = await reader.importRepository(fixtureRoot);
-    const imp = buildRepositoryImport(reader, repo);
-
     const dupes = JSON.stringify([
       {
         id: "dup",
         title: "First",
-        description: "d",
-        entryFiles: ["src/index.ts"],
+        description: "Follow alpha.",
+        entryFiles: ["src/a.ts"],
         difficulty: "intro",
       },
       {
         id: "dup",
         title: "Second",
-        description: "d",
-        entryFiles: ["src/parse/validate.ts"],
-        difficulty: "intermediate",
+        description: "Follow beta.",
+        entryFiles: ["src/b.ts"],
+        difficulty: "intro",
       },
     ]);
-    const { provider, requests } = recordingProvider([dupes]);
-    const generator = new ModelCandidateGenerator({ provider });
-    const candidates = await generator.generate({
-      reader,
-      repo,
-      tree: imp.tree,
-      entryCandidates: imp.entryCandidates,
-      packageInfo: imp.packageInfo,
-    });
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [dupes]);
 
     expect(requests).toHaveLength(1);
     expect(candidates).toHaveLength(2);
@@ -340,48 +369,99 @@ describe("ModelCandidateGenerator", () => {
   });
 
   it("caps the model output at 3 candidates", async () => {
-    const reader = makeReader();
-    const repo = await reader.importRepository(fixtureRoot);
-    const imp = buildRepositoryImport(reader, repo);
-
     const five = JSON.stringify([
       {
         id: "t1",
-        title: "Trace the createTracker call chain",
-        description: "Follow createTracker.",
-        entryFiles: ["src/index.ts"],
+        title: "Trace alpha",
+        description: "Follow alpha.",
+        entryFiles: ["src/a.ts"],
         difficulty: "intro",
       },
       {
         id: "t2",
-        title: "Trace parseTask",
-        description: "Follow parseTask as it splits the raw string into fields.",
-        entryFiles: ["src/parse/task.ts"],
+        title: "Trace beta",
+        description: "Follow beta.",
+        entryFiles: ["src/b.ts"],
         difficulty: "intro",
       },
       {
         id: "t3",
-        title: "Trace validate",
-        description: "Follow validate as it rejects invalid tasks.",
-        entryFiles: ["src/parse/validate.ts"],
+        title: "Trace gamma",
+        description: "Follow gamma.",
+        entryFiles: ["src/c.ts"],
         difficulty: "intermediate",
       },
       {
         id: "t4",
-        title: "Trace MemoryStore",
-        description: "Follow MemoryStore.add as it assigns an id and stores.",
-        entryFiles: ["src/store/memory.ts"],
+        title: "Trace delta",
+        description: "Follow delta.",
+        entryFiles: ["src/d.ts"],
         difficulty: "intermediate",
       },
       {
         id: "t5",
-        title: "Trace formatTask",
-        description: "Follow formatTask as it renders a stored task.",
-        entryFiles: ["src/render/format.ts"],
+        title: "Trace epsilon",
+        description: "Follow epsilon.",
+        entryFiles: ["src/e.ts"],
         difficulty: "advanced",
       },
     ]);
-    const { provider, requests } = recordingProvider([five]);
+    const { requests, candidates } = await generateForFiles(BARREL_FILES, [five]);
+
+    expect(requests).toHaveLength(1);
+    expect(candidates).toHaveLength(3);
+    expect(candidates.map((c) => c.id)).toEqual(["t1", "t2", "t3"]);
+  });
+
+  it("drops a candidate whose entry file is a real doc but not a resolved definition", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const bogus = JSON.stringify([
+      {
+        id: "m1",
+        title: "Trace the invented thing",
+        description: "Trace inventedThing as it transforms the input.",
+        entryFiles: ["README.md"],
+        difficulty: "intro",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([bogus]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    // README.md is in the tree (so `filterCandidatesToTree` keeps it) but is
+    // neither an entry candidate nor a barrel-penetrated definition, and
+    // `inventedThing` names no real symbol — so the candidate is dropped and
+    // generation retries once, then falls back to the heuristic.
+    expect(requests).toHaveLength(2);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.id !== "m1")).toBe(true);
+  });
+
+  it("keeps a candidate whose entry file and named symbol are real", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const valid = JSON.stringify([
+      {
+        id: "m1",
+        title: "Trace the createTracker call chain",
+        description:
+          "Follow createTracker as it wires parse, validate, store and render.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([valid]);
     const generator = new ModelCandidateGenerator({ provider });
     const candidates = await generator.generate({
       reader,
@@ -392,7 +472,46 @@ describe("ModelCandidateGenerator", () => {
     });
 
     expect(requests).toHaveLength(1);
-    expect(candidates).toHaveLength(3);
-    expect(candidates.map((c) => c.id)).toEqual(["t1", "t2", "t3"]);
+    expect(candidates.map((c) => c.id)).toEqual(["m1"]);
+  });
+
+  it("falls back to the heuristic when every model candidate names fabricated symbols", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const fabricated = JSON.stringify([
+      {
+        id: "f1",
+        title: "Trace inventedThing",
+        description: "Trace inventedThing as it runs.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "f2",
+        title: "Trace anotherInvention",
+        description: "Trace anotherInvention as it runs.",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([fabricated]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    // Both names are code-shaped but undefined in the repository, so every
+    // model candidate is dropped and generation falls back to the heuristic.
+    expect(requests).toHaveLength(2);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(featureCandidateSchema.safeParse(candidate).success).toBe(true);
+    }
   });
 });
