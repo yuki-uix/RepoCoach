@@ -19,8 +19,9 @@ import {
   type ChatProvider,
 } from "../agent/index.js";
 import type { PackageInfo, Repository } from "../reader/index.js";
-import { HeuristicCandidateGenerator } from "./heuristic.js";
+import { HeuristicCandidateGenerator, type ResolvedSymbol } from "./heuristic.js";
 import {
+  disambiguateCandidateTitles,
   ensureUniqueCandidateIds,
   filterCandidatesToTree,
   type CandidateGenerator,
@@ -63,11 +64,15 @@ export class ModelCandidateGenerator implements CandidateGenerator {
   }
 
   async generate(input: CandidateGeneratorInput): Promise<FeatureCandidate[]> {
+    // Reuse the heuristic's barrel penetration so the model chooses among the
+    // real definitions (file + symbol) instead of inventing symbols from the
+    // tree alone.
+    const resolvedSymbols = await this.heuristic.resolveSymbols(input);
     const messages: ChatMessage[] = [
       { role: "system", content: MODEL_SYSTEM_PROMPT },
       {
         role: "user",
-        content: wrapRepoData(buildModelInputText(input), {
+        content: wrapRepoData(buildModelInputText(input, resolvedSymbols), {
           tool: "candidate_generation",
         }),
       },
@@ -86,7 +91,7 @@ export class ModelCandidateGenerator implements CandidateGenerator {
       if (candidates !== null) {
         const kept = filterCandidatesToTree(candidates, input.tree);
         if (kept.length > 0) {
-          return ensureUniqueCandidateIds(kept);
+          return disambiguateCandidateTitles(ensureUniqueCandidateIds(kept));
         }
       }
       messages.push({ role: "user", content: RETRY_MESSAGE });
@@ -96,7 +101,10 @@ export class ModelCandidateGenerator implements CandidateGenerator {
   }
 }
 
-function buildModelInputText(input: CandidateGeneratorInput): string {
+function buildModelInputText(
+  input: CandidateGeneratorInput,
+  resolvedSymbols: ResolvedSymbol[],
+): string {
   const lines: string[] = [];
   lines.push(`Repository: ${input.packageInfo?.name ?? repoDisplayName(input.repo)}`);
   if (input.workspacePath !== undefined) {
@@ -108,6 +116,16 @@ function buildModelInputText(input: CandidateGeneratorInput): string {
       input.entryCandidates.length > 0 ? input.entryCandidates.join(", ") : "(none)"
     }`,
   );
+  lines.push(`Resolved symbols (barrel-penetrated definitions; prefer these):`);
+  if (resolvedSymbols.length === 0) {
+    lines.push("(none)");
+  } else {
+    for (const symbol of resolvedSymbols) {
+      lines.push(
+        `- file=${symbol.file} symbol=${symbol.symbol.name} kind=${symbol.symbol.kind} exportedFrom=${symbol.exportedFrom}`,
+      );
+    }
+  }
   lines.push(`Files (${input.tree.length}):`);
   for (const entry of input.tree) {
     lines.push(`- ${entry.path}`);

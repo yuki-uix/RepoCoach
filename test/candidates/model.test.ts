@@ -122,6 +122,77 @@ describe("ModelCandidateGenerator", () => {
     expect(user?.content ?? "").toContain("src/index.ts");
   });
 
+  it("feeds barrel-penetrated real symbols into the model input", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const valid = JSON.stringify([
+      {
+        id: "m1",
+        title: "Model candidate",
+        description: "d",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([valid]);
+    const generator = new ModelCandidateGenerator({ provider });
+    await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    const user = requests[0]!.messages.find((message) => message.role === "user");
+    // The model is handed the barrel-penetrated definitions, not just the raw
+    // file list, so it can pick among real symbols.
+    expect(user?.content ?? "").toContain("Resolved symbols");
+    expect(user?.content ?? "").toContain("file=src/index.ts");
+    expect(user?.content ?? "").toContain("symbol=createTracker");
+  });
+
+  it("disambiguates duplicate titles from the model", async () => {
+    const reader = makeReader();
+    const repo = await reader.importRepository(fixtureRoot);
+    const imp = buildRepositoryImport(reader, repo);
+
+    const dupes = JSON.stringify([
+      {
+        id: "t1",
+        title: "Trace the string call chain",
+        description: "d",
+        entryFiles: ["src/index.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "t2",
+        title: "Trace the string call chain",
+        description: "d",
+        entryFiles: ["src/parse/validate.ts"],
+        difficulty: "intermediate",
+      },
+    ]);
+    const { provider, requests } = recordingProvider([dupes]);
+    const generator = new ModelCandidateGenerator({ provider });
+    const candidates = await generator.generate({
+      reader,
+      repo,
+      tree: imp.tree,
+      entryCandidates: imp.entryCandidates,
+      packageInfo: imp.packageInfo,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(candidates).toHaveLength(2);
+    const titles = candidates.map((candidate) => candidate.title);
+    expect(new Set(titles).size).toBe(titles.length);
+    // The duplicate carries its defining file so the two choices are tellable.
+    expect(titles.some((title) => title.includes("src/parse/validate.ts"))).toBe(true);
+  });
+
   it("disambiguates duplicate ids from the model", async () => {
     const reader = makeReader();
     const repo = await reader.importRepository(fixtureRoot);

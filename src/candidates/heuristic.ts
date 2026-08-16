@@ -22,6 +22,7 @@
 import type { FeatureCandidate } from "../domain/index.js";
 import type { Reader, Repository } from "../reader/index.js";
 import {
+  disambiguateCandidateTitles,
   ensureUniqueCandidateIds,
   filterCandidatesToTree,
   validateCandidates,
@@ -29,7 +30,7 @@ import {
   type CandidateGeneratorInput,
 } from "./index.js";
 
-interface FoundSymbol {
+export interface FoundSymbol {
   name: string;
   kind: "function" | "class";
 }
@@ -38,6 +39,19 @@ interface FoundSymbol {
 interface LocatedSymbol {
   file: string;
   symbol: FoundSymbol;
+}
+
+/**
+ * A barrel-penetrated symbol ready for candidate generation: the file that
+ * actually defines it plus the entry candidate that re-exported it. Exposed so
+ * the model generator can propose candidates over these real definitions.
+ */
+export interface ResolvedSymbol {
+  /** The file that defines the symbol (the candidate's real entry file). */
+  file: string;
+  symbol: FoundSymbol;
+  /** The entry candidate that re-exports it (may equal `file`). */
+  exportedFrom: string;
 }
 
 interface RankedSymbol {
@@ -88,14 +102,56 @@ const IMPORT_SPECIFIER_RES = [
 
 export class HeuristicCandidateGenerator implements CandidateGenerator {
   async generate(input: CandidateGeneratorInput): Promise<FeatureCandidate[]> {
-    const treePaths = new Set(input.tree.map((entry) => entry.path));
     const difficultyByFile = new Map<string, FeatureCandidate["difficulty"]>();
-    // Two entries can re-export the same barrel; collapse duplicate symbols
-    // (file + name) so a shared core module does not produce near-identical
-    // candidates for every entry that happens to re-export it.
-    const seenSymbols = new Set<string>();
 
     const ranked: RankedSymbol[] = [];
+    for (const located of await this.resolveSymbols(input)) {
+      const references = await this.countReferences(
+        input.reader,
+        input.repo,
+        located.file,
+        located.symbol.name,
+      );
+      let difficulty = difficultyByFile.get(located.file);
+      if (difficulty === undefined) {
+        difficulty = await this.estimateDifficulty(input, located.file);
+        difficultyByFile.set(located.file, difficulty);
+      }
+      ranked.push({
+        entryFile: located.file,
+        exportedFrom: located.exportedFrom,
+        symbol: located.symbol,
+        references,
+        difficulty,
+      });
+    }
+
+    ranked.sort((a, b) => b.references - a.references);
+    const candidates = ranked.slice(0, 3).map((item) =>
+      this.symbolCandidate(item),
+    );
+    if (candidates.length === 0) {
+      candidates.push(this.fallbackCandidate(input));
+    }
+
+    return disambiguateCandidateTitles(
+      ensureUniqueCandidateIds(
+        filterCandidatesToTree(validateCandidates(candidates), input.tree),
+      ),
+    );
+  }
+
+  /**
+   * Resolve the exportable symbols reachable from every entry candidate,
+   * following re-export barrels, and collapse duplicates (file + name) so a
+   * shared core module does not repeat for every entry that re-exports it. The
+   * model generator reuses this same resolution so it proposes candidates over
+   * the real definitions rather than inventing symbols.
+   */
+  async resolveSymbols(input: CandidateGeneratorInput): Promise<ResolvedSymbol[]> {
+    const treePaths = new Set(input.tree.map((entry) => entry.path));
+    const seenSymbols = new Set<string>();
+    const resolved: ResolvedSymbol[] = [];
     for (const entryFile of input.entryCandidates) {
       const symbols = await this.collectExportedSymbols(
         input.reader,
@@ -109,39 +165,14 @@ export class HeuristicCandidateGenerator implements CandidateGenerator {
           continue;
         }
         seenSymbols.add(key);
-
-        const references = await this.countReferences(
-          input.reader,
-          input.repo,
-          located.file,
-          located.symbol.name,
-        );
-        let difficulty = difficultyByFile.get(located.file);
-        if (difficulty === undefined) {
-          difficulty = await this.estimateDifficulty(input, located.file);
-          difficultyByFile.set(located.file, difficulty);
-        }
-        ranked.push({
-          entryFile: located.file,
-          exportedFrom: entryFile,
+        resolved.push({
+          file: located.file,
           symbol: located.symbol,
-          references,
-          difficulty,
+          exportedFrom: entryFile,
         });
       }
     }
-
-    ranked.sort((a, b) => b.references - a.references);
-    const candidates = ranked.slice(0, 3).map((item) =>
-      this.symbolCandidate(item),
-    );
-    if (candidates.length === 0) {
-      candidates.push(this.fallbackCandidate(input));
-    }
-
-    return ensureUniqueCandidateIds(
-      filterCandidatesToTree(validateCandidates(candidates), input.tree),
-    );
+    return resolved;
   }
 
   /**

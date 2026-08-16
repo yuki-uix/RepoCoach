@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  disambiguateCandidateTitles,
   filterCandidatesToTree,
   type CandidateGenerator,
   type CandidateGeneratorInput,
@@ -275,6 +276,10 @@ describe("HeuristicCandidateGenerator", () => {
     const ids = candidates.map((candidate) => candidate.id);
     expect(ids.length).toBeGreaterThan(1);
     expect(new Set(ids).size).toBe(ids.length);
+    // The two same-named `handler` symbols must also read as distinct choices —
+    // identical titles would leave the learner unable to tell them apart.
+    const titles = candidates.map((candidate) => candidate.title);
+    expect(new Set(titles).size).toBe(titles.length);
     // Each id is keyed by its entry file, so find() resolves the right one.
     for (const candidate of candidates) {
       const [entryFile] = candidate.entryFiles;
@@ -316,6 +321,52 @@ describe("HeuristicCandidateGenerator", () => {
     for (const candidate of candidates) {
       expect(candidates.find((item) => item.id === candidate.id)).toBe(candidate);
     }
+  });
+});
+
+describe("disambiguateCandidateTitles", () => {
+  it("appends the defining file to a duplicate title", () => {
+    const result = disambiguateCandidateTitles([
+      {
+        id: "a",
+        title: "Trace the string call chain",
+        description: "d",
+        entryFiles: ["src/a.ts"],
+        difficulty: "intro",
+      },
+      {
+        id: "b",
+        title: "Trace the string call chain",
+        description: "d",
+        entryFiles: ["src/b.ts"],
+        difficulty: "intermediate",
+      },
+    ]);
+
+    expect(result.map((candidate) => candidate.title)).toEqual([
+      "Trace the string call chain",
+      "Trace the string call chain (src/b.ts)",
+    ]);
+  });
+
+  it("falls back to a numeric suffix when a duplicate has no entry file", () => {
+    const result = disambiguateCandidateTitles([
+      { id: "a", title: "Same", description: "d", entryFiles: [], difficulty: "intro" },
+      { id: "b", title: "Same", description: "d", entryFiles: [], difficulty: "intro" },
+    ]);
+
+    expect(result.map((candidate) => candidate.title)).toEqual(["Same", "Same #2"]);
+  });
+
+  it("never leaves two identical titles even when sources collide", () => {
+    const result = disambiguateCandidateTitles([
+      { id: "a", title: "T", description: "d", entryFiles: ["src/a.ts"], difficulty: "intro" },
+      { id: "b", title: "T", description: "d", entryFiles: ["src/a.ts"], difficulty: "intro" },
+      { id: "c", title: "T", description: "d", entryFiles: ["src/a.ts"], difficulty: "intro" },
+    ]);
+
+    const titles = result.map((candidate) => candidate.title);
+    expect(new Set(titles).size).toBe(titles.length);
   });
 });
 
