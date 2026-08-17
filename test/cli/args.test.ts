@@ -49,6 +49,10 @@ describe("runCli override validation", () => {
     [["--max-input-tokens", "3.5"], "max-input-tokens"],
     [["--max-output-tokens", "abc"], "max-output-tokens"],
     [["--max-output-tokens"], "max-output-tokens"],
+    // Past Number.MAX_SAFE_INTEGER the session schema rejects the value; catch
+    // it here rather than mid-start, after the clone and candidate generation.
+    [["--max-input-tokens", "9007199254740992"], "max-input-tokens"],
+    [["--max-turns", "99999999999999999999"], "max-turns"],
   ])("rejects %j with a usage error", async (extra, flag) => {
     const streams = capturedStreams();
     const code = await runCli(["start", "./repo", ...extra], {

@@ -541,7 +541,13 @@ interface TurnBudgetOverrides {
 /** A command-line usage problem, reported via `usageError` (exit 1). */
 class UsageError extends Error {}
 
-/** Parse a positive-integer flag value; `undefined` means the flag was absent. */
+/**
+ * Parse a positive-integer flag value; `undefined` means the flag was absent.
+ * The upper bound matters: the session schema rejects integers past
+ * `Number.MAX_SAFE_INTEGER`, and without this check an oversized value would
+ * pass the CLI and only blow up inside `createSession` — after the clone,
+ * workspace prompt and candidate generation have already run.
+ */
 function parsePositiveInt(raw: string | undefined, flag: string): number | undefined {
   if (raw === undefined) {
     return undefined;
@@ -549,7 +555,13 @@ function parsePositiveInt(raw: string | undefined, flag: string): number | undef
   if (!/^[1-9]\d*$/.test(raw)) {
     throw new UsageError(`--${flag} requires a positive integer, got "${raw}"`);
   }
-  return Number(raw);
+  const value = Number(raw);
+  if (value > Number.MAX_SAFE_INTEGER) {
+    throw new UsageError(
+      `--${flag} must be at most ${Number.MAX_SAFE_INTEGER}, got "${raw}"`,
+    );
+  }
+  return value;
 }
 
 /** The override flags, paired with the CLI spelling used in error messages. */
