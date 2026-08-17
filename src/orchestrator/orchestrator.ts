@@ -57,7 +57,7 @@ export interface OrchestratorOptions {
   store: SessionStore;
   sessionId: string;
   featureGoal: string;
-  /** Max questions per session (default 5). */
+  /** Max questions per session (default 3). */
   maxTurns?: number;
   budget?: TokenBudget;
   /**
@@ -68,7 +68,13 @@ export interface OrchestratorOptions {
   initialUsage?: TokenUsage;
 }
 
-const DEFAULT_MAX_TURNS = 5;
+/**
+ * Default questions per session. Lowered from 5 to 3 (issue #33): a single
+ * real-repository question costs 330–360k tokens, so five questions never fit
+ * the 320k budget — measured runs complete only one. Three questions is the
+ * smallest full "predict → correct → restate" loop.
+ */
+export const DEFAULT_MAX_TURNS = 3;
 /**
  * Default per-session token budget. Measured from real-model smoke runs: two
  * 4-question sessions consumed 121,972 input / 20,997 output and 199,241 input

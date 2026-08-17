@@ -77,6 +77,8 @@ export class JsonSessionStore implements PersistentSessionStore {
       ...(input.workspacePath === undefined
         ? {}
         : { workspacePath: input.workspacePath }),
+      ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      ...(input.budget === undefined ? {} : { budget: input.budget }),
       phase: "orientation",
       turnCount: 0,
       status: "active",
