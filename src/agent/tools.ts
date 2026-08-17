@@ -517,6 +517,12 @@ function readFile(
   }
   // Same-turn re-read of the exact range: point at the earlier result instead
   // of re-sending the full text (issue #23, token waste).
+  //
+  // This deliberately stops suppressing once the same-turn compression window
+  // (issue #36) has revoked the range: "see above" would then point at a
+  // placeholder the model cannot read, so the re-read must return the content
+  // again. Paying for the re-read is the intended cost of citing evicted
+  // content — see the revoked-range test in test/agent/tools.test.ts.
   if (runtime.returnRecorder?.hasRead?.(args.path, slice.startLine, slice.endLine)) {
     return `${args.path} (lines ${slice.startLine}-${slice.endLine}) 本轮已读，见上文。`;
   }

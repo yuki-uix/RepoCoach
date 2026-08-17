@@ -94,3 +94,78 @@ describe("ToolReturnLedger carried ranges", () => {
     expect(ledger.hasCarried("src/index.ts", 1, 10)).toBe(false);
   });
 });
+
+describe("ToolReturnLedger round revocation", () => {
+  it("revokes only the ranges recorded in the given round", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 1, 10);
+    ledger.record("src/index.ts", 20, 30);
+    ledger.setRound(1);
+    ledger.record("src/index.ts", 40, 50);
+
+    ledger.revokeRound(0);
+
+    expect(ledger.isGrounded(claim("src/index.ts", 1, 5))).toBe(false);
+    expect(ledger.isGrounded(claim("src/index.ts", 20, 25))).toBe(false);
+    expect(ledger.isGrounded(claim("src/index.ts", 40, 45))).toBe(true);
+  });
+
+  it("leaves a re-read sub-range on the same path citable (revocation is per round, not per path)", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 1, 10);
+    ledger.setRound(1);
+    ledger.record("src/index.ts", 1, 3); // re-read a sub-range in a live round
+
+    ledger.revokeRound(0);
+
+    // The round-1 sub-range survives, but the round-0 tail does not.
+    expect(ledger.isGrounded(claim("src/index.ts", 1, 3))).toBe(true);
+    expect(ledger.isGrounded(claim("src/index.ts", 4, 10))).toBe(false);
+  });
+
+  it("never revokes carried ranges", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.recordCarried("src/a.ts", 1, 50);
+    ledger.setRound(0);
+    ledger.record("src/b.ts", 1, 5);
+
+    ledger.revokeRound(0);
+
+    expect(ledger.isGrounded(claim("src/a.ts", 10, 20))).toBe(true);
+    expect(ledger.isGrounded(claim("src/b.ts", 1, 5))).toBe(false);
+  });
+
+  // Without this, compression would revoke ranges the model had already saved
+  // as accepted evidence, and submit_decision would reject the model's own
+  // evidence — failing the turn instead of just costing fewer tokens.
+  it("keeps an already-validated range citable after its round is revoked", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 1, 10);
+    ledger.recordValidated("src/index.ts", 2, 4); // saved while still visible
+
+    ledger.revokeRound(0);
+
+    expect(ledger.isGrounded(claim("src/index.ts", 2, 4))).toBe(true);
+    // Only what was actually saved survives; the rest of the round is gone.
+    expect(ledger.isGrounded(claim("src/index.ts", 1, 10))).toBe(false);
+    // And it does not masquerade as content still present in the context, so a
+    // re-read is not suppressed.
+    expect(ledger.hasCarried("src/index.ts", 2, 4)).toBe(false);
+  });
+
+  it("resetTurn clears the round association for the next turn", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(3);
+    ledger.record("src/index.ts", 1, 10);
+
+    ledger.resetTurn();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 5, 6);
+
+    expect(ledger.isGrounded(claim("src/index.ts", 1, 2))).toBe(false);
+    expect(ledger.isGrounded(claim("src/index.ts", 5, 6))).toBe(true);
+  });
+});

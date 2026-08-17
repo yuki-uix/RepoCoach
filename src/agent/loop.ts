@@ -36,7 +36,7 @@ import {
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { formatZodError } from "./errors.js";
 import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
-import { byteLength } from "./limits.js";
+import { MAX_LIVE_TOOL_ROUNDS, byteLength } from "./limits.js";
 import { injectedMessageKind } from "./message-kinds.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
@@ -96,6 +96,28 @@ export type AgentLoopEvent =
       endLine: number;
       /** 0-based turn index the read happened in. */
       turnIndex: number;
+    }
+  | {
+      /**
+       * One provider call's outgoing message payload, for issue #36. Measuring
+       * precedes any compression work, because a paper estimate of this ratio
+       * has already been wrong once (issue #33).
+       *
+       * The two tool figures are deliberately distinct, and the gap between
+       * them is itself the interesting number — it is the tool payload the
+       * window can never remove:
+       * - `toolResultBytes`: every `role: "tool"` message, including the
+       *   `repo_save_evidence` receipts and the decision-correction messages
+       *   that are exempt from compression by design.
+       * - `compressibleBytes`: only the repo-data results the window is
+       *   eligible to replace (the `COMPRESSIBLE_TOOLS` set).
+       */
+      type: "provider_request";
+      round: number;
+      messageCount: number;
+      bytes: number;
+      toolResultBytes: number;
+      compressibleBytes: number;
     }
   | { type: "carried_context"; bytes: number; turnIndex: number }
   | { type: "entry_outline"; bytes: number; turnIndex: number };
@@ -252,6 +274,9 @@ export class AgentLoop {
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     const collectedEvidence: Evidence[] = [];
     const messages = await this.buildInitialMessages(input);
+    // Per-round bookkeeping for the compression window: every compressible repo
+    // tool result pushed below, keyed by its message position and producing round.
+    const toolResultRecords: ToolResultRecord[] = [];
 
     let decisionRetries = 0;
     let forceMessageAdded = false;
@@ -278,6 +303,12 @@ export class AgentLoop {
     };
 
     for (let round = 0; round < maxRounds; round++) {
+      // Tag this round's tool returns with the round, and compress (and revoke
+      // the grounding of) any result that has aged out of the live window before
+      // the outgoing messages are sent.
+      this.ledger?.setRound(round);
+      this.compressExpiredToolResults(messages, toolResultRecords, round);
+
       const forceDecision = round >= this.maxToolRounds;
       const tools = forceDecision ? [submitDecisionTool] : this.allTools;
 
@@ -286,7 +317,12 @@ export class AgentLoop {
         forceMessageAdded = true;
       }
 
-      const result = await this.callProvider(messages, tools);
+      const result = await this.callProvider(
+        messages,
+        tools,
+        round,
+        new Set(toolResultRecords.map((record) => record.messageIndex)),
+      );
       usage.inputTokens += result.usage.inputTokens;
       usage.outputTokens += result.usage.outputTokens;
       messages.push(result.message);
@@ -385,6 +421,18 @@ export class AgentLoop {
           toolCallId: toolCall.id,
           content: capRepoData(result, meta, REPO_TOOL_RESULT_KIND.cap),
         });
+        // Only repo-data results are eligible for window compression; the
+        // rejectDecision correction and the force-limit error pushed above are
+        // never recorded, so they can never be compressed. `submit_decision` is
+        // handled earlier in this loop and never reaches here.
+        if (COMPRESSIBLE_TOOLS.has(toolCall.name)) {
+          toolResultRecords.push({
+            messageIndex: messages.length - 1,
+            round,
+            tool: toolCall.name,
+            ...toolResultLocator(args),
+          });
+        }
       }
     }
 
@@ -473,10 +521,65 @@ export class AgentLoop {
     return built.content;
   }
 
+  /**
+   * Same-turn sliding-window compression (issue #36): replace the content of
+   * repo tool results that are MAX_LIVE_TOOL_ROUNDS or more rounds old with a
+   * placeholder line, and revoke their grounding in the same breath.
+   *
+   * The unit is a provider-call round, not a message — a round with several
+   * tool calls keeps or compresses all its results together. Only repo data
+   * results are compressed: rejectDecision corrections and the force-limit
+   * error message are never recorded here, so they can never be compressed
+   * regardless of how old they get. The current round's results are not yet in
+   * `messages` at this point, and any live round is skipped by the distance
+   * check, so "current round never compressed" holds by construction.
+   */
+  private compressExpiredToolResults(
+    messages: ChatMessage[],
+    records: ToolResultRecord[],
+    round: number,
+  ): void {
+    const expiredRounds = new Set<number>();
+    for (const record of records) {
+      if (round - record.round < MAX_LIVE_TOOL_ROUNDS) {
+        continue;
+      }
+      // Replace the content in place, keeping role/toolCallId so the message
+      // still links back to the assistant's tool call. Re-wrapping keeps the
+      // data-guard markers on the message (repository data never re-enters the
+      // conversation unwrapped) and the terminal byte cap on the placeholder.
+      const meta: RepoDataMeta = { tool: record.tool, path: record.path };
+      messages[record.messageIndex]!.content = capRepoData(
+        toolResultPlaceholder(record),
+        meta,
+        REPO_TOOL_RESULT_KIND.cap,
+      );
+      expiredRounds.add(record.round);
+    }
+    // The grounding half of the window: content pushed out is no longer citable,
+    // revoked at the same moment so the model cannot cite from a memory of the
+    // placeholder. Revocation is per round, never per path (see ledger.ts).
+    for (const expiredRound of expiredRounds) {
+      this.ledger?.revokeRound(expiredRound);
+    }
+  }
+
   private async callProvider(
     messages: ChatMessage[],
     tools: ToolDefinition[],
+    round = 0,
+    compressibleIndices: ReadonlySet<number> = new Set(),
   ): Promise<{ message: ChatMessage; usage: TokenUsage }> {
+    this.emit({
+      type: "provider_request",
+      round,
+      messageCount: messages.length,
+      bytes: messagesByteLength(messages),
+      toolResultBytes: messagesByteLength(messages.filter((m) => m.role === "tool")),
+      compressibleBytes: messagesByteLength(
+        messages.filter((_, index) => compressibleIndices.has(index)),
+      ),
+    });
     const onProviderEvent = (event: ChatProviderEvent): void => {
       this.emit({ type: "text_delta", delta: event.delta });
     };
@@ -553,6 +656,97 @@ function pathOfTool(name: string, args: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * The repo tools whose results are repository *data*. Only these are eligible
+ * for the same-turn window compression (issue #36): their content is large and
+ * resent every provider call. `repo_save_evidence` is deliberately excluded —
+ * its result is a validation receipt the model must keep seeing, not file data.
+ * `submit_decision` is a terminal tool and never produces a data result here.
+ */
+const COMPRESSIBLE_TOOLS = new Set([
+  "repo_get_tree",
+  "repo_search",
+  "repo_read_file",
+  "repo_get_package_info",
+]);
+
+/** What a compressed placeholder must preserve: path and line range, when present. */
+interface ToolResultLocator {
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+}
+
+/**
+ * The bookkeeping for one compressible tool-result message: where it sits in
+ * `messages`, which round produced it, and the locator for its placeholder.
+ */
+interface ToolResultRecord {
+  messageIndex: number;
+  round: number;
+  tool: string;
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+}
+
+/**
+ * Extract the path + line range a tool call names, for the placeholder. Mirrors
+ * `pathOfTool`'s shape but also captures the read range so the model still knows
+ * exactly what was dropped and what to re-read.
+ */
+function toolResultLocator(args: unknown): ToolResultLocator {
+  if (typeof args === "object" && args !== null) {
+    const obj = args as Record<string, unknown>;
+    const locator: ToolResultLocator = {};
+    if (typeof obj.path === "string") {
+      locator.path = obj.path;
+    }
+    if (typeof obj.startLine === "number" && typeof obj.endLine === "number") {
+      locator.startLine = obj.startLine;
+      locator.endLine = obj.endLine;
+    }
+    return locator;
+  }
+  return {};
+}
+
+/**
+ * The placeholder a compressed tool result becomes. It names the tool and (when
+ * the call had one) the path + line range, so the model knows what existed,
+ * where, and that re-reading is the cost of citing it again. The body is later
+ * wrapped by `capRepoData`, so it keeps the data-guard markers and never enters
+ * the conversation as a bare directive.
+ */
+function toolResultPlaceholder(record: ToolResultRecord): string {
+  let locator = record.tool;
+  if (record.path !== undefined) {
+    locator += `(path=${record.path}`;
+    if (record.startLine !== undefined && record.endLine !== undefined) {
+      locator += `, lines=${record.startLine}-${record.endLine}`;
+    }
+    locator += `)`;
+  }
+  return `${locator} → 内容已省略（超出最近 ${MAX_LIVE_TOOL_ROUNDS} 轮窗口）；如需引用请重新读取`;
+}
+
+/**
+ * Wire size of a message list: text content plus the JSON of any tool-call
+ * arguments. An approximation of what the provider bills — exact token counts
+ * are provider-side — but it is the same measure before and after compression,
+ * which is what issue #36 needs.
+ */
+function messagesByteLength(messages: ChatMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    total += byteLength(message.content ?? "");
+    for (const call of message.toolCalls ?? []) {
+      total += byteLength(call.name) + byteLength(call.arguments);
+    }
+  }
+  return total;
 }
 
 function buildTurnInstruction(input: AgentInvokerInput): string {

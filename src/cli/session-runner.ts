@@ -66,6 +66,20 @@ class EventSink {
       case "text_delta":
         this.progress(event.delta);
         break;
+      case "provider_request":
+        // Only under REPOCOACH_TRACE_REQUESTS: this is measurement output for
+        // issue #36, not something a learner needs on every call.
+        if (process.env.REPOCOACH_TRACE_REQUESTS === "1") {
+          this.flush();
+          this.stderr.write(
+            dim(
+              `  [req] round=${event.round} msgs=${event.messageCount} ` +
+                `bytes=${event.bytes} toolResultBytes=${event.toolResultBytes} ` +
+                `compressibleBytes=${event.compressibleBytes}`,
+            ) + "\n",
+          );
+        }
+        break;
       case "decision_submitted":
         break;
     }

@@ -429,6 +429,33 @@ describe("same-turn read dedup", () => {
     expect(second).not.toContain("return a + b");
   });
 
+  // Once the same-turn compression window (issue #36) revokes a range, "see
+  // above" would point at a placeholder the model cannot read. Re-sending the
+  // content is the intended cost of citing evicted content, so the dedup must
+  // stop firing — pinned here rather than left as an emergent side effect.
+  it("re-sends the content once the compression window revoked the range", async () => {
+    const { reader, repo } = makeTempReader(FILES);
+    const ledger = new ToolReturnLedger();
+    const registry = createToolRegistry({ reader, repo, returnRecorder: ledger });
+
+    ledger.setRound(0);
+    await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+    ledger.revokeRound(0);
+
+    const again = await registry.execute({
+      name: "repo_read_file",
+      args: { path: "src/index.ts", startLine: 1, endLine: 3 },
+      collectedEvidence: [],
+    });
+
+    expect(again).not.toContain("本轮已读");
+    expect(again).toContain("return a + b");
+  });
+
   it("does not dedup a different range of the same file", async () => {
     const { reader, repo } = makeTempReader(FILES);
     const ledger = new ToolReturnLedger();

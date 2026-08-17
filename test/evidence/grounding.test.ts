@@ -33,6 +33,29 @@ describe("GroundingEvidenceValidator", () => {
     }
   });
 
+  // The compression window (issue #36) revokes a round's ranges once its tool
+  // results leave the context. An accepted claim must survive that, or the
+  // model's own saved evidence is rejected when it repeats it in
+  // submit_decision — turning a cost optimisation into a failed turn.
+  it("keeps an accepted claim citable after its round is revoked", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 10, 20);
+    const validator = new GroundingEvidenceValidator({
+      ledger,
+      store: new InMemoryEvidenceStore(),
+      sessionId: "s1",
+    });
+
+    expect(validator.validate(claim("src/index.ts", 12, 15)).ok).toBe(true);
+    ledger.revokeRound(0);
+
+    // Re-cited at submit_decision, after compression dropped round 0.
+    expect(validator.validate(claim("src/index.ts", 12, 15)).ok).toBe(true);
+    // A range that was never accepted is still gone.
+    expect(validator.validate(claim("src/index.ts", 10, 20)).ok).toBe(false);
+  });
+
   it("saves a grounded claim to the store with the current turn", () => {
     const ledger = new ToolReturnLedger();
     ledger.record("src/index.ts", 10, 20);

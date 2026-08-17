@@ -26,6 +26,8 @@ Agent 的回答必须尽量建立在仓库中的真实文件上。模型的常�
 
 跨轮读缓存（issue #25）扩展了这一语义：Agent Loop 会把上一轮已读的文件范围按字节预算择要携带进下一轮上下文，接地闸同步接受"本轮上下文实际携带"的范围——只认真正带进上下文的那些，被降级为"只列 path 不带内容"的范围不可引用（与截断只记实际显示行是同一纪律）。
 
+同轮滑动窗口压缩（issue #36）是这条纪律的又一种形态：默认 320k 预算下 Zod 实测 16 次 provider 调用共发出 1,168,610 字节，其中 1,033,741（88.5%）是同一轮内累积、被反复重发的工具结果；按每轮增量模拟，只保留最近 4 轮（`MAX_LIVE_TOOL_ROUNDS = 4`）可把发出量压到基线的 49%。Agent Loop 在组装发给 provider 的 messages 时，把超出最近 4 轮窗口的仓库读取类工具结果替换为占位行（保留工具名与 path/行号范围、注明需重新读取），并在同一时刻把该轮记录的范围从 `ToolReturnLedger` 撤销——**范围被移出窗口时，同步移出可引用集合**。压缩只针对仓库读取类数据（repo_read_file / repo_search / repo_get_tree / repo_get_package_info），不碰 repo_save_evidence 的校验回执，更不碰 rejectDecision 推入的纠错指令（判据是"仓库数据结果"，不是 `role === tool`）。
+
 首轮入口摘要（issue #29）是又一条"结构信息进上下文"的路径，纪律是相反的：它只给顶层导出符号名与行号、不含实现内容，经 data-guard 包裹并受独立字节上限约束，且**不记入 ledger**——模型看到符号名不等于看到实现，引用前仍需先 `repo_read_file` 那个范围。
 
 ## 2. 逻辑架构
@@ -120,6 +122,7 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 - 记录本轮所有工具返回的 (path, 行号范围)，供证据接地校验；
 - 将模型输出解析为 `AgentDecision` 并做 Schema 校验；
 - 跨轮读缓存（issue #25）：`SessionReadCache` 记录本 Session 内经 `repo_read_file` 返回的 (path, 行号范围, 内容)，跨轮存活（与账本的 `resetTurn` 无关）。第 2 轮起组装消息时，把缓存内容按 `MAX_CARRIED_CONTEXT_BYTES`（默认 24 KiB）择要携带进上下文，优先保留最近使用与被引用过的范围，其余只列 path 与行号范围并注明"如需内容请重读"。该区块经 data-guard 包裹（仓库数据永不进 system prompt）。缓存不持久化——resume 后第一轮没有已读上下文，模型会重读，此为接受的取舍。
+- 同轮滑动窗口压缩（issue #36）：工具结果超出最近 `MAX_LIVE_TOOL_ROUNDS`（默认 4）个 provider 调用轮后，其内容被替换为占位行（保留工具名与 path/行号范围、注明需重新读取），该轮记录的接地范围同步撤销——**压缩即失去可引用性**，与 #25 跨轮缓存降级是同一条纪律。窗口单位是 provider 调用轮而非消息条数，一轮多工具调用整体保留或整体压缩；当前轮永不压缩；压缩只针对仓库读取类数据结果，不碰 repo_save_evidence 回执与 rejectDecision 纠错指令。
 - 首轮入口摘要（issue #29）：候选的 `entryFiles` 经 barrel 穿透解析出真实定义符号（复用 PR #30 的 `resolveSymbols`），把顶层导出符号名 + 行号组成结构摘要，仅首轮注入上下文。受 `MAX_ENTRY_OUTLINE_BYTES`（默认 8 KiB）独立上限约束、经 data-guard 包裹；摘要只含符号名与行号、不记入 ledger。
 - 批量证据（issue #29）：`repo_save_evidence` 接受 `items` 数组，一次提交本轮全部证据，把 Hono 上 16 次独立调用合并为约 1 次往返；数组里的每条仍逐条过 `EvidenceValidator`，合格的保存、不合格的在返回值中逐条列出原因。
 
@@ -217,7 +220,9 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 - 证据引用有两个出口——`repo_save_evidence` 工具与 `submit_decision.evidence` 字段——两者都必须过 `EvidenceValidator`，且 **grounding validator 在生产组装入口是强制注入项**：`acceptAllEvidence` 仅供单测使用，CLI/API 组装时不注入接地校验即为缺陷；
 - 文件内容有四个出口——read-file、search、tree、**package-info**——四者都必须过 fs-guard 与统一的 filters 谓词（package-info 曾以 `readFileSync` 裸读 `package.json`，符号链接可越界，正是本条规则要抓的形态）；
 - 跨轮读缓存（issue #25）新增一个"文件内容重新进入上下文"的出口：`SessionReadCache` 的内容在下一轮被携带进 prompt 时，必须经 `wrapUntrustedContext` 包裹（仓库数据永不进 system prompt），且接地闸只认**本轮真正携带了内容**的范围——范围在缓存里但本轮被降级为"只列 path 不带内容"的，一律不可引用。
+- 同轮滑动窗口压缩（issue #36）新增一条"文件内容重新离开上下文"的路径：工具结果被窗口压成占位行时，其范围必须同步从 `ToolReturnLedger` 撤销（`revokeRound`），否则模型仍能引用已经看不到的内容——这正是要防的幻觉形态。撤销精确到"这一轮记录的那些范围"，不能把同一 path 的其他轮范围一起撤掉，与 #25 跨轮缓存降级是同一条纪律。
 - 首轮入口摘要（issue #29）新增一条"结构信息进上下文"的路径：同样必须经 data-guard 包裹、受独立字节上限约束，且因为只含符号名与行号、不记入 ledger——这条路径可以引用"符号在哪"却不能引用实现。
+- 同轮工具结果的窗口压缩（issue #36）是"内容离开上下文"的第三条路径：超出最近 `MAX_LIVE_TOOL_ROUNDS`（4）轮的仓库工具结果被替换为占位行，**其范围同时移出可引用集合**——与 #25 跨轮缓存降级是同一条纪律（看不到内容就不能引用）。唯一例外是**本轮已经过校验并保存的范围**：它在模型还能看见内容时就被检查过，`submit_decision` 里重复引用是对既有结论的复述而非新主张；若一并撤销，循环会拒掉模型自己已被接受的证据，把一次成本优化变成一次失败的轮次。该例外单独成列（不并入 carried），因为 carried 还驱动"内容已在上下文、不必重发"的判断，压缩后那句话不再成立。
 - 批量证据（issue #29）是接地入口的批量形态：数组里的每条仍逐条过 `EvidenceValidator`，不允许整批放行或整批丢弃——批量只减少往返，不放松接地。
 - 新增任何"模型输出进入产品状态"的路径（未来的 recap 生成、UI 展示等）时，先问：这类数据已有的闸在哪，新路径过了吗。
 

@@ -15,6 +15,12 @@ interface RecordedRange {
   path: string;
   startLine: number;
   endLine: number;
+  /**
+   * The within-turn provider-call round the range was recorded in (0-based).
+   * Only tool returns are tagged; carried ranges keep `round: -1` and are never
+   * revoked by the same-turn compression window.
+   */
+  round: number;
 }
 
 /**
@@ -27,6 +33,23 @@ export class ToolReturnLedger {
   private ranges: RecordedRange[] = [];
   /** Ranges carried into this turn's context (from the session read cache). */
   private carried: RecordedRange[] = [];
+  /**
+   * Ranges already validated and saved this turn. Grounded for the rest of the
+   * turn regardless of the compression window; see `recordValidated`.
+   */
+  private validated: RecordedRange[] = [];
+  /** The current within-turn round `record` tags new ranges with. */
+  private currentRound = 0;
+
+  /**
+   * Advance the within-turn round (0-based provider-call index). The loop calls
+   * this before executing each round's tool calls so `record` tags ranges with
+   * the round that produced them, letting `revokeRound` later drop exactly the
+   * ranges pushed out of the live window by compression (issue #36).
+   */
+  setRound(round: number): void {
+    this.currentRound = round;
+  }
 
   /** Record a (path, inclusive line range) the tools actually returned. */
   record(path: string, startLine: number, endLine: number): void {
@@ -34,6 +57,44 @@ export class ToolReturnLedger {
       path: normalizePath(path),
       startLine,
       endLine,
+      round: this.currentRound,
+    });
+  }
+
+  /**
+   * Remove every range recorded in `round`, leaving ranges recorded in other
+   * rounds (and every carried range) untouched. This is the grounding half of
+   * the compression window: when a round's tool results are replaced by
+   * placeholder lines, their ranges stop being citable in the same breath — the
+   * model no longer sees the content, so a citation would be hallucinated. The
+   * revocation is per-round and per-range, never "everything on this path", so a
+   * sub-range re-read in a still-live round stays citable.
+   */
+  revokeRound(round: number): void {
+    this.ranges = this.ranges.filter((range) => range.round !== round);
+  }
+
+  /**
+   * Record a range that already passed validation and was saved to the Evidence
+   * Store this turn. Such a range stays citable for the rest of the turn even
+   * after the compression window revokes the round that produced it: the model
+   * saw the content at the moment it made the claim, and the claim was checked
+   * then. Re-citing it in `submit_decision` is a reference to an already
+   * validated claim, not a new one, so revoking it would make the loop reject
+   * the model's own accepted evidence and fail the turn.
+   *
+   * Deliberately a list of its own rather than a push into `carried`: `carried`
+   * also drives `hasCarried`, which tells the read tool "the content is already
+   * in context, do not re-send it". After compression that is false, so reusing
+   * `carried` here would suppress a re-read of content the model can no longer
+   * see.
+   */
+  recordValidated(path: string, startLine: number, endLine: number): void {
+    this.validated.push({
+      path: normalizePath(path),
+      startLine,
+      endLine,
+      round: -1,
     });
   }
 
@@ -48,6 +109,7 @@ export class ToolReturnLedger {
       path: normalizePath(path),
       startLine,
       endLine,
+      round: -1,
     });
   }
 
@@ -93,13 +155,19 @@ export class ToolReturnLedger {
       range.path === path &&
       range.startLine <= claim.startLine &&
       claim.endLine <= range.endLine;
-    return this.ranges.some(contained) || this.carried.some(contained);
+    return (
+      this.ranges.some(contained) ||
+      this.carried.some(contained) ||
+      this.validated.some(contained)
+    );
   }
 
   /** Clear every recorded range (start of a new turn). */
   resetTurn(): void {
     this.ranges = [];
     this.carried = [];
+    this.validated = [];
+    this.currentRound = 0;
   }
 }
 

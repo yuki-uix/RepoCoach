@@ -31,6 +31,23 @@ export const MAX_CARRIED_CONTEXT_BYTES = 24 * 1024;
  * the whole point.
  */
 export const MAX_ENTRY_OUTLINE_BYTES = 8 * 1024;
+/**
+ * Number of provider-call rounds a same-turn tool result stays live (its full
+ * content kept in the outgoing messages) before the loop replaces it with a
+ * placeholder line (issue #36). The unit is a provider call, not a message:
+ * a round with several tool calls (batch evidence, #29) keeps or compresses its
+ * results together.
+ *
+ * Value from the Zod measurement in issue #36: over 16 provider calls the loop
+ * sent 1,168,610 bytes, of which 1,033,741 (88.5%) were tool results accumulated
+ * earlier in the same turn and resent every call. A per-round-increment
+ * simulation showed keeping only the most recent 4 rounds shrinks the sent bytes
+ * to 49% of baseline (~195k input tokens). A result is live while the current
+ * round is less than MAX_LIVE_TOOL_ROUNDS ahead of the round that produced it
+ * (i.e. the current round plus the previous three), and compressed once it is
+ * MAX_LIVE_TOOL_ROUNDS or more rounds old.
+ */
+export const MAX_LIVE_TOOL_ROUNDS = 4;
 
 export function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
