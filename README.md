@@ -42,7 +42,7 @@ MVP 范围：
 - 公开 GitHub 仓库
 - TypeScript / JavaScript 项目
 - 单次只学习一个功能路径
-- 每次 Session 最多 3 个问题（可用 `--max-turns` 覆盖）
+- 每次 Session 最多 3 个问题（可用 `--max-turns` 覆盖）；大仓库可能在 Token 预算耗尽时提前收尾，用 `--max-input-tokens` 抬高上限
 - 文本交互
 - 文件路径和行号引用
 - Session 可恢复

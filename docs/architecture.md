@@ -103,7 +103,9 @@ Monorepo（如 pi-mono）需要先定位 workspace：导入阶段解析根 `pack
 
 - 状态转换（`phase` 由应用层持有并作为入参传给 Agent，模型不决定阶段）；
 - 当前功能和学习目标；
-- 最大轮数（默认 3，可用 `--max-turns` 覆盖）和 Token 预算（默认单 Session 上限 320k input / 70k output tokens，可用 `--max-input-tokens` / `--max-output-tokens` 覆盖）。依据两轮真模型实测：121,972 input / 20,997 output 与 199,241 input / 43,817 output（两轮都在 4 问时撞上当时的输出上限、被迫提前收敛），跑满 5 问实测 235,399 input / 53,720 output（见 issue #23）；真实仓库单问成本 330–360k token，320k 预算下 5 问从未达成、实测只能完成 1 问，故默认降为 3（见 issue #33）；
+- 最大轮数（默认 3，可用 `--max-turns` 覆盖）和 Token 预算（默认单 Session 上限 320k input / 70k output tokens，可用 `--max-input-tokens` / `--max-output-tokens` 覆盖）。依据两轮真模型实测：121,972 input / 20,997 output 与 199,241 input / 43,817 output（两轮都在 4 问时撞上当时的输出上限、被迫提前收敛），跑满 5 问实测 235,399 input / 53,720 output（见 issue #23）；真实仓库上 5 问从未达成——实测只能完成 1 问就撞上预算，故默认降为 3（见 issue #33）。
+
+  注意轮数与预算是两道独立的闸，真实大仓库通常撞的是后者。把上限抬到 2M 后在 Zod 实测：第 1 问约 0.4M input，到第 2 问累计 1,257,408，收尾复盘时 1,795,158——**单问成本随轮次超线性增长**，因为每次调用都要重发整段对话，包括同一轮内累积的工具结果。按此估算 3 问约需 3M input，是当前默认值的约十倍。因此默认预算保持 320k，定位是**成本上限而非目标**：大仓库会在预算处提前收尾并给出复盘；愿意付全额的用户用 `--max-input-tokens` 抬高。降低单问成本的方向仍在 issue #33 跟踪；
 - 调用 Agent；
 - 保存每一轮结果。
 

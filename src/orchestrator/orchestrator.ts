@@ -69,10 +69,11 @@ export interface OrchestratorOptions {
 }
 
 /**
- * Default questions per session. Lowered from 5 to 3 (issue #33): a single
- * real-repository question costs 330–360k tokens, so five questions never fit
- * the 320k budget — measured runs complete only one. Three questions is the
- * smallest full "predict → correct → restate" loop.
+ * Default questions per session. Lowered from 5 to 3 (issue #33): five questions
+ * were never reached on a real repository — measured runs complete one before
+ * the token budget stops them. Three is the smallest full "predict → correct →
+ * restate" loop, so it is the honest target. Note the turn limit is rarely what
+ * ends a real-repo session; see DEFAULT_BUDGET below for the measured costs.
  */
 export const DEFAULT_MAX_TURNS = 3;
 /**
@@ -80,8 +81,18 @@ export const DEFAULT_MAX_TURNS = 3;
  * 4-question sessions consumed 121,972 input / 20,997 output and 199,241 input
  * / 43,817 output tokens (both hit the then-current output cap and were forced
  * to converge early), and a complete 5-question run measured 235,399 input /
- * 53,720 output. These limits leave headroom above that measured full run. Cost
- * grows linearly with turns because of cross-turn re-reads (issue #25).
+ * 53,720 output. These limits leave headroom above that measured full run.
+ *
+ * They are NOT enough for a large real repository, and deliberately so. Measured
+ * on Zod with the cap lifted to 2M (issue #33): question 1 cost ~0.4M input,
+ * cumulative 1,257,408 at question 2, and 1,795,158 by the closing recap — cost
+ * per question grows super-linearly, because every call resends the whole
+ * conversation including the tool results accumulated within the same turn. A
+ * default sized for three real-repo questions would be ~3M input tokens, roughly
+ * ten times this cap, so the budget stays a cost ceiling rather than a target:
+ * a large repository ends its session early, at the budget, with a recap.
+ * `--max-input-tokens` / `--max-output-tokens` raise it per session for anyone
+ * who wants to pay for the full three questions.
  */
 export const DEFAULT_BUDGET: TokenBudget = {
   maxInputTokens: 320_000,
