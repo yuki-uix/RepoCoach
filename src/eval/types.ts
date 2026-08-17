@@ -30,6 +30,23 @@ export interface EvalTurn {
 /** The terminal phase an eval session reached. */
 export type EvalEndPhase = "recap" | "error";
 
+/**
+ * One outgoing provider call's payload figures, from the `provider_request`
+ * event (#36). A raw measurement, not a score: the runner records these while
+ * the loop runs and never alters them, so the bench summary can recompute any
+ * statistic (peak, sum, spread) from the same values it would lose otherwise.
+ */
+export interface ProviderRequestRecord {
+  round: number;
+  messageCount: number;
+  /** Full outgoing message payload, in bytes. */
+  bytes: number;
+  /** Bytes of the `role: "tool"` slice (all tool results, incl. receipts). */
+  toolResultBytes: number;
+  /** Bytes of the window-eligible repo-data subset (the `COMPRESSIBLE_TOOLS` set). */
+  compressibleBytes: number;
+}
+
 /** A complete, metric-ready eval session. */
 export interface EvalRun {
   repositoryPath: string;
@@ -75,4 +92,20 @@ export interface EvalRun {
    * candidate had no entry files or none resolved to exported symbols.
    */
   entryOutlineBytes: number[];
+  /**
+   * Per-provider-call payload figures (the `provider_request` event from #36),
+   * one entry per outgoing call, in call order. The bench summary derives
+   * provider-call count, peak payload bytes and the two byte sums from this
+   * array, so it is kept raw rather than pre-reduced. Empty when the session
+   * never called the provider.
+   */
+  providerRequests: ProviderRequestRecord[];
+  /**
+   * Questions asked (prediction + follow-ups), read back from the persisted
+   * session's `turnCount`. This is the product "completed a learning chain"
+   * count for a real-repo benchmark. It comes from the store, not from counting
+   * `turns`, because recap and degraded turns also live in that array and would
+   * over-count.
+   */
+  turnCount: number;
 }

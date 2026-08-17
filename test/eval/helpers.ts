@@ -31,6 +31,8 @@ export function makeEvalRun(overrides: Partial<EvalRun> = {}): EvalRun {
     carriedBytes: [],
     saveEvidenceCalls: 0,
     entryOutlineBytes: [],
+    providerRequests: [],
+    turnCount: 0,
     ...overrides,
   };
 }

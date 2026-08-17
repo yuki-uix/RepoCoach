@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 import { renderInline } from "../cli/markdown.js";
+import { runBench } from "./bench.js";
 import { runAbEval, runEval } from "./cli.js";
 import type { EvalMode } from "./report.js";
 
 const modeArg = process.argv[2];
 const mode: EvalMode = modeArg === "real" ? "real" : "mock";
 const isAb = modeArg === "ab";
+const isBench = modeArg === "bench";
 const out = optionValue("--out");
 const carry = !hasFlag("--no-carry");
+const runsArg = optionValue("--runs");
+const runs = runsArg === undefined ? undefined : Number(runsArg);
+const benchmark = optionValue("--benchmark");
 
 try {
-  if (isAb) {
+  if (isBench) {
+    await runBench({ runs, benchmark, out });
+  } else if (isAb) {
     await runAbEval({ out });
   } else {
     await runEval(mode, { out, carry });

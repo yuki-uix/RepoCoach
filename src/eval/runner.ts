@@ -15,7 +15,12 @@ import type { SessionAssembly } from "../cli/assemble.js";
 import { lastFeedback, renderRecap } from "../cli/recap.js";
 import type { Repository } from "../reader/index.js";
 import { repeatedReadCount, type ReadOccurrence } from "./metrics.js";
-import type { EvalEndPhase, EvalRun, EvalTurn } from "./types.js";
+import type {
+  EvalEndPhase,
+  EvalRun,
+  EvalTurn,
+  ProviderRequestRecord,
+} from "./types.js";
 
 export interface RunSessionOptions {
   asm: SessionAssembly;
@@ -37,13 +42,15 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
   const session = asm.store.createSession({ repositoryId: repositoryPath, featureId });
 
   // Instrument the loop via its event stream: tool-call counts, content-returning
-  // reads (for the repeated-reads metric), per-turn carried bytes, and the
-  // first-turn entry outline bytes. These are counts the harness records while
+  // reads (for the repeated-reads metric), per-turn carried bytes, the
+  // first-turn entry outline bytes, and the per-call payload figures from the
+  // `provider_request` event (#36). These are counts the harness records while
   // the loop runs; they never alter behaviour.
   const toolCalls = new Map<string, number>();
   const reads: ReadOccurrence[] = [];
   const carriedBytes: number[] = [];
   const entryOutlineBytes: number[] = [];
+  const providerRequests: ProviderRequestRecord[] = [];
   const onEvent = (event: AgentLoopEvent): void => {
     switch (event.type) {
       case "tool_call_started":
@@ -62,6 +69,15 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
         break;
       case "entry_outline":
         entryOutlineBytes.push(event.bytes);
+        break;
+      case "provider_request":
+        providerRequests.push({
+          round: event.round,
+          messageCount: event.messageCount,
+          bytes: event.bytes,
+          toolResultBytes: event.toolResultBytes,
+          compressibleBytes: event.compressibleBytes,
+        });
         break;
       default:
         break;
@@ -119,6 +135,9 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
   }
 
   const wallClockMs = Math.round(performance.now() - startedAt);
+  // Questions asked (prediction + follow-ups), read back from the store rather
+  // than counted from `turns`: recap/degraded turns are in that array too.
+  const turnCount = asm.store.getSession(session.id)?.turnCount ?? 0;
   const persistedTurns = asm.store.listTurns(session.id);
   const finalFeedback = lastFeedback(persistedTurns);
   const recap = renderRecap({
@@ -147,5 +166,7 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
     carriedBytes,
     saveEvidenceCalls: toolCalls.get("repo_save_evidence") ?? 0,
     entryOutlineBytes,
+    providerRequests,
+    turnCount,
   };
 }

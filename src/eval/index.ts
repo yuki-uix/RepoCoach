@@ -67,4 +67,29 @@ export {
 } from "./fixtures.js";
 export type { AnswerSample, CallChainStep } from "./fixtures.js";
 
-export type { EvalEndPhase, EvalRun, EvalTurn } from "./types.js";
+export type { EvalEndPhase, EvalRun, EvalTurn, ProviderRequestRecord } from "./types.js";
+
+export {
+  collectBenchMetrics,
+  renderBenchReport,
+  runBench,
+  serializeBenchReport,
+  summarizeBenchSection,
+  writeBenchReport,
+} from "./bench.js";
+export type {
+  BenchMetricKey,
+  BenchMetricSummaries,
+  BenchOptions,
+  BenchReport,
+  BenchRunEntry,
+  BenchRunMetrics,
+  BenchSection,
+  BenchSectionSummary,
+} from "./bench.js";
+
+export { median, spread } from "./benchmark-stats.js";
+export type { Spread } from "./benchmark-stats.js";
+
+export { loadBenchmarks } from "./benchmarks.js";
+export type { Benchmark } from "./benchmarks.js";
