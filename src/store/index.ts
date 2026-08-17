@@ -12,6 +12,7 @@ import {
   learningTurnSchema,
   type LearningSession,
   type LearningTurn,
+  type TokenBudget,
 } from "../domain/index.js";
 
 export interface CreateSessionInput {
@@ -19,6 +20,10 @@ export interface CreateSessionInput {
   featureId: string;
   /** Selected workspace directory (monorepo); absent for a root-scoped session. */
   workspacePath?: string;
+  /** Question limit override (`--max-turns`); absent means the Orchestrator default. */
+  maxTurns?: number;
+  /** Token budget override (`--max-input-tokens` / `--max-output-tokens`). */
+  budget?: TokenBudget;
 }
 
 /** Mutable session fields. id / repositoryId / featureId / workspacePath are immutable. */
@@ -61,6 +66,8 @@ export class InMemorySessionStore implements SessionStore {
       ...(input.workspacePath === undefined
         ? {}
         : { workspacePath: input.workspacePath }),
+      ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      ...(input.budget === undefined ? {} : { budget: input.budget }),
       phase: "orientation",
       turnCount: 0,
       status: "active",

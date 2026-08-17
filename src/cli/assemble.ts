@@ -185,6 +185,8 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
           sessionId,
           featureGoal,
           initialUsage: session?.usage,
+          maxTurns: session?.maxTurns,
+          budget: session?.budget,
         }),
         loop,
       };

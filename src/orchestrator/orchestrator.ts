@@ -57,7 +57,7 @@ export interface OrchestratorOptions {
   store: SessionStore;
   sessionId: string;
   featureGoal: string;
-  /** Max questions per session (default 5). */
+  /** Max questions per session (default 3). */
   maxTurns?: number;
   budget?: TokenBudget;
   /**
@@ -68,14 +68,31 @@ export interface OrchestratorOptions {
   initialUsage?: TokenUsage;
 }
 
-const DEFAULT_MAX_TURNS = 5;
+/**
+ * Default questions per session. Lowered from 5 to 3 (issue #33): five questions
+ * were never reached on a real repository — measured runs complete one before
+ * the token budget stops them. Three is the smallest full "predict → correct →
+ * restate" loop, so it is the honest target. Note the turn limit is rarely what
+ * ends a real-repo session; see DEFAULT_BUDGET below for the measured costs.
+ */
+export const DEFAULT_MAX_TURNS = 3;
 /**
  * Default per-session token budget. Measured from real-model smoke runs: two
  * 4-question sessions consumed 121,972 input / 20,997 output and 199,241 input
  * / 43,817 output tokens (both hit the then-current output cap and were forced
  * to converge early), and a complete 5-question run measured 235,399 input /
- * 53,720 output. These limits leave headroom above that measured full run. Cost
- * grows linearly with turns because of cross-turn re-reads (issue #25).
+ * 53,720 output. These limits leave headroom above that measured full run.
+ *
+ * They are NOT enough for a large real repository, and deliberately so. Measured
+ * on Zod with the cap lifted to 2M (issue #33): question 1 cost ~0.4M input,
+ * cumulative 1,257,408 at question 2, and 1,795,158 by the closing recap — cost
+ * per question grows super-linearly, because every call resends the whole
+ * conversation including the tool results accumulated within the same turn. A
+ * default sized for three real-repo questions would be ~3M input tokens, roughly
+ * ten times this cap, so the budget stays a cost ceiling rather than a target:
+ * a large repository ends its session early, at the budget, with a recap.
+ * `--max-input-tokens` / `--max-output-tokens` raise it per session for anyone
+ * who wants to pay for the full three questions.
  */
 export const DEFAULT_BUDGET: TokenBudget = {
   maxInputTokens: 320_000,
@@ -141,6 +158,15 @@ export class Orchestrator {
       );
     }
 
+    // The budget is a hard ceiling, so it is checked *before* the call, not
+    // only after. A fresh session starts at zero usage and never trips this,
+    // but a resumed one carries its persisted usage: without this check the
+    // first resumed step would spend another model call just to discover it
+    // was already over budget.
+    if (this.isBudgetExceeded()) {
+      return this.closeOverBudget(session);
+    }
+
     const invocation = await this.invokeWithRetry(phase, session, input);
     if (invocation === null) {
       // The agent never produced a schema-valid decision. If the session
@@ -203,6 +229,27 @@ export class Orchestrator {
    * when the session already has evidence or posed questions, otherwise abandon
    * the session. Either way the learner keeps whatever was persisted.
    */
+  /**
+   * Close a session that is already over budget before any model call. The
+   * session keeps whatever it has and moves straight to recap; `renderRecap`
+   * builds it from the stored evidence, so no further agent call is needed.
+   */
+  private closeOverBudget(session: LearningSession): StepResult {
+    this.store.updateSession(this.sessionId, {
+      phase: "recap",
+      status: "completed",
+      turnCount: session.turnCount,
+      usage: this.accumulatedUsage,
+    });
+    return {
+      phase: "recap",
+      decision: null,
+      decisionOverridden: true,
+      turn: null,
+      budgetExceeded: true,
+    };
+  }
+
   private degrade(): StepResult {
     const turns = this.store.listTurns(this.sessionId);
     const hasContent = turns.some(

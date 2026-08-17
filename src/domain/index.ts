@@ -79,6 +79,12 @@ export const tokenUsageSchema = z.object({
 });
 export type TokenUsage = z.infer<typeof tokenUsageSchema>;
 
+export const tokenBudgetSchema = z.object({
+  maxInputTokens: z.number().int().positive(),
+  maxOutputTokens: z.number().int().positive(),
+});
+export type TokenBudget = z.infer<typeof tokenBudgetSchema>;
+
 export const learningSessionSchema = z.object({
   id: z.string(),
   repositoryId: z.string(),
@@ -94,6 +100,21 @@ export const learningSessionSchema = z.object({
   /** Number of questions asked so far (prediction + follow-ups). */
   turnCount: z.number().int().nonnegative(),
   status: sessionStatusSchema,
+  /**
+   * Per-session question limit override (from `--max-turns`). Persisted so a
+   * resumed session keeps the limit it was started with instead of falling back
+   * to the default. Optional for backward compatibility with session files
+   * written before turn/budget overrides existed.
+   */
+  maxTurns: z.number().int().positive().optional(),
+  /**
+   * Per-session token budget override (from `--max-input-tokens` /
+   * `--max-output-tokens`). Persisted for the same reason as `maxTurns`: a
+   * resumed session must keep the budget it was started with, otherwise its
+   * accumulated usage can exceed the fallback default and force an immediate
+   * over-budget recap. Optional for backward compatibility.
+   */
+  budget: tokenBudgetSchema.optional(),
   /**
    * Cumulative token usage across every agent call so far. Persisted so an
    * interrupted session resumes its budget accounting instead of resetting it.
@@ -152,9 +173,3 @@ export const agentDecisionSchema = z
     }
   });
 export type AgentDecision = z.infer<typeof agentDecisionSchema>;
-
-export const tokenBudgetSchema = z.object({
-  maxInputTokens: z.number().int().positive(),
-  maxOutputTokens: z.number().int().positive(),
-});
-export type TokenBudget = z.infer<typeof tokenBudgetSchema>;

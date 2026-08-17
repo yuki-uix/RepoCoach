@@ -11,7 +11,8 @@
 
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
-import type { FeatureCandidate } from "../domain/index.js";
+import type { FeatureCandidate, TokenBudget } from "../domain/index.js";
+import { DEFAULT_BUDGET } from "../orchestrator/orchestrator.js";
 import { resumeSession } from "../store/index.js";
 import type { Repository } from "../reader/index.js";
 import {
@@ -107,7 +108,24 @@ function makePrompt(stdin: Readable, stdout: Writable): Prompt {
  * handled inside the runner, 1 any error).
  */
 export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number> {
-  const { command, arg, dataDir } = parseArgs(argv);
+  const parsed = parseArgs(argv);
+  const { command, arg, dataDir } = parsed;
+
+  // Validate the turn/budget overrides up front: an invalid value is a usage
+  // error (exit 1), never a silent fallback to the default. The overrides are
+  // persisted at session creation, so only `start` can honour them — passing
+  // them to any other command is rejected rather than silently ignored.
+  let overrides: TurnBudgetOverrides;
+  try {
+    rejectMisplacedOverrides(command, parsed);
+    overrides = parseOverrides(parsed);
+  } catch (error) {
+    if (error instanceof UsageError) {
+      return usageError(deps, error.message);
+    }
+    throw error;
+  }
+
   const resolvedDeps = dataDir === undefined ? deps : { ...deps, dataDir };
   try {
     switch (command) {
@@ -115,7 +133,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         if (arg === undefined) {
           return usageError(deps, "start requires a <url-or-path>");
         }
-        return await runStart(arg, resolvedDeps);
+        return await runStart(arg, resolvedDeps, overrides);
       case "resume":
         if (arg === undefined) {
           return usageError(deps, "resume requires a <sessionId>");
@@ -138,7 +156,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
   }
 }
 
-async function runStart(input: string, deps: CliDeps): Promise<number> {
+async function runStart(input: string, deps: CliDeps, overrides: TurnBudgetOverrides): Promise<number> {
   const asm = assembleSession(deps);
   const prompt = makePrompt(asm.stdin, asm.stdout);
   try {
@@ -159,6 +177,8 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
       ...(scope.workspacePath === undefined
         ? {}
         : { workspacePath: scope.workspacePath }),
+      ...(overrides.maxTurns === undefined ? {} : { maxTurns: overrides.maxTurns }),
+      ...(overrides.budget === undefined ? {} : { budget: overrides.budget }),
     });
     const runner = buildRunner(
       asm,
@@ -319,6 +339,11 @@ async function finishSession(
     asm.stderr.write(
       `⚠ 模型未能产出有效决策，已用已保存证据合成一份最小复盘。\n`,
     );
+  } else if (outcome.overBudget) {
+    asm.stderr.write(
+      `⚠ 该 Session 恢复时已超出 Token 预算，未再调用模型，直接用已保存证据合成复盘。\n` +
+        `  下次可用 repocoach start ... --max-input-tokens <n> 提高上限。\n`,
+    );
   }
   asm.stdout.write(`${recap}\n`);
 
@@ -467,23 +492,123 @@ export function splitRepositoryId(repositoryId: string): {
     : { input: repositoryId };
 }
 
-function parseArgs(argv: string[]): {
+/** The raw CLI arguments after splitting off the command and its flags. */
+export interface ParsedArgs {
   command: string;
   arg?: string;
   dataDir?: string;
-} {
+  /** Raw value of `--max-turns`; `undefined` when absent, `""` when the value is missing. */
+  maxTurns?: string;
+  maxInputTokens?: string;
+  maxOutputTokens?: string;
+}
+
+/**
+ * Split `argv` into the command, the positional argument and the known flags.
+ * Every recognised `--flag` consumes its value (even when the value is missing),
+ * so a flag value is never mistaken for the positional argument. Unknown tokens
+ * after the first non-flag token are ignored, matching the old behaviour.
+ */
+export function parseArgs(argv: string[]): ParsedArgs {
   const command = argv[0] ?? "";
   let arg: string | undefined;
   let dataDir: string | undefined;
+  let maxTurns: string | undefined;
+  let maxInputTokens: string | undefined;
+  let maxOutputTokens: string | undefined;
   for (let i = 1; i < argv.length; i++) {
-    if (argv[i] === "--data-dir") {
+    const token = argv[i];
+    if (token === "--data-dir") {
       dataDir = argv[i + 1];
       i += 1;
+    } else if (token === "--max-turns") {
+      maxTurns = argv[i + 1] ?? "";
+      i += 1;
+    } else if (token === "--max-input-tokens") {
+      maxInputTokens = argv[i + 1] ?? "";
+      i += 1;
+    } else if (token === "--max-output-tokens") {
+      maxOutputTokens = argv[i + 1] ?? "";
+      i += 1;
     } else if (arg === undefined) {
-      arg = argv[i];
+      arg = token;
     }
   }
-  return { command, arg, dataDir };
+  return { command, arg, dataDir, maxTurns, maxInputTokens, maxOutputTokens };
+}
+
+/** Validated turn/budget overrides, ready to persist on a new session. */
+interface TurnBudgetOverrides {
+  maxTurns?: number;
+  budget?: TokenBudget;
+}
+
+/** A command-line usage problem, reported via `usageError` (exit 1). */
+class UsageError extends Error {}
+
+/**
+ * Parse a positive-integer flag value; `undefined` means the flag was absent.
+ * The upper bound matters: the session schema rejects integers past
+ * `Number.MAX_SAFE_INTEGER`, and without this check an oversized value would
+ * pass the CLI and only blow up inside `createSession` — after the clone,
+ * workspace prompt and candidate generation have already run.
+ */
+function parsePositiveInt(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new UsageError(`--${flag} requires a positive integer, got "${raw}"`);
+  }
+  const value = Number(raw);
+  if (value > Number.MAX_SAFE_INTEGER) {
+    throw new UsageError(
+      `--${flag} must be at most ${Number.MAX_SAFE_INTEGER}, got "${raw}"`,
+    );
+  }
+  return value;
+}
+
+/** The override flags, paired with the CLI spelling used in error messages. */
+const OVERRIDE_FLAGS = [
+  ["maxTurns", "max-turns"],
+  ["maxInputTokens", "max-input-tokens"],
+  ["maxOutputTokens", "max-output-tokens"],
+] as const;
+
+/**
+ * Reject an override flag on a command that cannot act on it. `resume` reads the
+ * limits the session was started with, and `list` / `show` never build an
+ * Orchestrator, so accepting the flag there would silently do nothing.
+ */
+function rejectMisplacedOverrides(command: string, parsed: ParsedArgs): void {
+  if (command === "start") {
+    return;
+  }
+  for (const [key, flag] of OVERRIDE_FLAGS) {
+    if (parsed[key] !== undefined) {
+      throw new UsageError(`--${flag} is only valid for start`);
+    }
+  }
+}
+
+/**
+ * Convert the raw flag values into the shape `createSession` persists. A budget
+ * with only one half overridden fills the missing half from `DEFAULT_BUDGET`, so
+ * `--max-input-tokens` alone does not leave `maxOutputTokens` undefined.
+ */
+function parseOverrides(parsed: ParsedArgs): TurnBudgetOverrides {
+  const maxTurns = parsePositiveInt(parsed.maxTurns, "max-turns");
+  const maxInputTokens = parsePositiveInt(parsed.maxInputTokens, "max-input-tokens");
+  const maxOutputTokens = parsePositiveInt(parsed.maxOutputTokens, "max-output-tokens");
+  const budget =
+    maxInputTokens === undefined && maxOutputTokens === undefined
+      ? undefined
+      : {
+          maxInputTokens: maxInputTokens ?? DEFAULT_BUDGET.maxInputTokens,
+          maxOutputTokens: maxOutputTokens ?? DEFAULT_BUDGET.maxOutputTokens,
+        };
+  return { maxTurns, budget };
 }
 
 function usageError(deps: CliDeps, message: string): number {
@@ -491,7 +616,7 @@ function usageError(deps: CliDeps, message: string): number {
   err.write(`Error: ${renderInline(message)}\n`);
   err.write(
     "Usage:\n" +
-      "  repocoach start <url-or-path> [--data-dir <dir>]\n" +
+      "  repocoach start <url-or-path> [--data-dir <dir>] [--max-turns <n>] [--max-input-tokens <n>] [--max-output-tokens <n>]\n" +
       "  repocoach resume <sessionId> [--data-dir <dir>]\n" +
       "  repocoach list [--data-dir <dir>]\n" +
       "  repocoach show <sessionId> [--data-dir <dir>]\n",
