@@ -1,13 +1,61 @@
 # RepoCoach Architecture
 
-> **导读。** 这份文档是「轮子长什么样」的完整表述——模块边界、状态机、安全边界。它是随开发过程增量写成的，比较长；如果你只是想知道这个 agent 的骨架，**整个架构真正由四条规则决定，其余都是细节**：
->
-> 1. **文件访问双闸**（§6）—— 每条访问路径都要过 fs-guard（realpath 收敛在仓库根内）**和** filters（扩展名、黑名单、密钥名、文件名控制字符）。四个出口 read-file / search / tree / package-info 无一例外。
-> 2. **仓库内容永远是数据**（§1、§3 Agent Loop）—— 包裹在 `REPO_DATA` 标记内，永不进 system prompt。
-> 3. **状态机由应用层持有**（§4、§5）—— `phase` 是 Orchestrator 的状态，作为入参传给模型；模型输出的 `nextAction` 只是建议。
-> 4. **构造性证据接地**（§1、§3 Evidence Store）—— 只接受本轮工具真实返回过的 (path, 行号)，服务端账本做交集校验。
->
-> 这四条是所有 review 争论的来源。项目的实测结论（成本、KV cache、状态持久化、prompt 出口闸、多模型协作）见 [README](../README.md)，那里是「哪些结论值得抄走」；本文是「实现长什么样」。
+## 0. Agent 结构速览
+
+本文完整描述模块边界、状态机与安全边界，随开发增量写成，偏长。这一节先用最短的篇幅说清这个 agent 是怎么构成的。
+
+### 四个组件
+
+| 组件 | 职责 | 不做什么 |
+|---|---|---|
+| **CLI** | 输入仓库、展示问题与证据、收集回答 | 不调模型、不解析仓库、不判对错 |
+| **Orchestrator** | 持有 `phase` 与会话状态，决定阶段如何转换，管轮数与预算 | 不组装 prompt、不碰工具 |
+| **Agent Loop** | 组装消息 → 调模型 → 执行工具 → 回填结果，直到模型交出结构化决策 | 不决定阶段、不决定会话何时结束 |
+| **Repository Reader** | 只读地克隆、遍历、检索、按行号切片 | 不执行仓库任何代码 |
+
+两个存储：**Session Store**（会话与每轮结果，JSON 文件，支持 resume）与 **Evidence Store**（证据引用及其原始上下文）。
+
+### 一轮是怎么跑的
+
+```text
+Orchestrator ──(phase, featureGoal, turnHistory)──▶ Agent Loop
+                                                        │
+                        ┌───────────────────────────────┤
+                        │  1. 组装消息                   │
+                        │     system prompt              │
+                        │     + 历史摘要                  │
+                        │     + 入口摘要（仅首轮）         │
+                        │     + 跨轮已读内容               │
+                        │     + 本轮指令                  │
+                        │                                │
+                        │  2. 调模型                      │
+                        │                                │
+                        │  3. 模型请求工具 ──▶ Reader     │
+                        │     结果包上 REPO_DATA 标记      │
+                        │     追加进消息，记入账本 ────┐   │
+                        │                             │   │
+                        └──── 回到 2，直到模型 ◀───────┘   │
+                              调用 submit_decision        │
+                                                          │
+                        4. 决策过 Schema 校验              │
+                        5. 决策里的证据过接地校验 ◀────────┘
+                           （只认账本里本轮真实返回过的范围）
+                                                        │
+Orchestrator ◀──────────(decision, usage)───────────────┘
+   6. 按状态机决定下一个 phase（模型的 nextAction 只是建议）
+   7. 持久化本轮结果
+```
+
+### 四条约束决定了这个结构
+
+其余都是细节：
+
+1. **文件访问双闸**（§6）—— 每条访问路径都要过 fs-guard（realpath 收敛在仓库根内）**和** filters（扩展名、黑名单、密钥名、文件名控制字符）。read-file / search / tree / package-info 四个出口无一例外。
+2. **仓库内容永远是数据**（§1、§3 Agent Loop）—— 包裹在 `REPO_DATA` 标记内，永不进 system prompt。README 里写着"忽略之前的指令"也只是文本。
+3. **状态机由应用层持有**（§4、§5）—— `phase` 是 Orchestrator 的状态，作为入参传给模型；模型输出的 `nextAction` 只是建议，转不转由 Orchestrator 裁决。
+4. **构造性证据接地**（§1、§3 Evidence Store）—— 引用只接受本轮工具真实返回过的 (path, 行号)，服务端账本做交集校验。幻觉引用在架构上被拒绝，而不是靠事后检测。
+
+这四条是历史上绝大多数 review 争论的来源。项目的实测结论（成本、KV cache、状态持久化、prompt 出口闸、多模型协作）见 [README](../README.md)。
 
 ## 1. 设计原则
 
@@ -247,6 +295,8 @@ Review checklist：改动引入新的输出/保存路径时，diff 里必须能�
 4. **对抗性 fixture**（`fixtures/fixture-adversarial/`）：一份同时攻击每道闸的仓库（伪造标记、ANSI/C1、超长行、畸形 UTF-8、二进制伪装、越界说明符、逃逸符号链接、恶意 workspace glob、文件名控制字符、超限体积），由 `test/coverage/adversarial-fixture.test.ts` 推过全部出口。增量价值在于**同一份恶意输入过所有出口**：只覆盖 read-file 而漏掉 search 的闸会在这里失败。
 
 非目标：不追求零复审轮次。语义判断（如"候选生成的是新增功能而非现存链路"）任何自动化都发现不了，那种复审有价值。这四项压掉的是机械可判定的部分。
+
+## 7. 评估
 
 ### Fixture eval
 
