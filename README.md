@@ -1,183 +1,298 @@
 # RepoCoach
 
-RepoCoach 是一个面向技术面试和开源贡献的源码学习 Agent。
+一个 agent 垂直切片，以及一次多模型协作开发的实验记录。
 
-它不会把整个 GitHub 仓库直接总结成一篇 Wiki，而是带用户沿着一个真实功能的调用链阅读源码：先让用户预测，再检索代码证据，接着追问、纠错，最后生成复盘。
+代码本身是一个源码学习 agent：给它一个 GitHub 仓库，它挑一条真实功能的调用链，先让你预测，再用带行号的源码证据纠正你。**但这个仓库的价值不在产品，在于它把 agent 工程里几个反直觉的问题跑到了有数据的程度**——成本到底花在哪、安全闸怎么才不漏、KV cache 客户端能做什么、状态怎么跨进程活下来、prompt 约束为什么必须配出口闸。
 
-## 项目状态
+以及：**用 Claude Code 定计划与 review、DeepSeek 做实现、GPT 做外部复审**，这套分工实际跑 22 个 PR 之后的经验。
 
-早期 MVP 设计阶段。
+> **项目状态：不再继续开发。** 技术切片已跑通（638 个测试、22 个合并 PR），该验证的工程问题也基本验证完了。推进到这一步时评估下来，继续投入的投入产出比不足以支撑——产品侧的差异化空间有限，工程侧剩余的优化点收益也在收敛。综合权衡后决定收尾，把已经跑出数据的部分整理成可复用的经验。理由展开见文末「停止开发的考量」。
+>
+> 下面每条结论都有实测数据支撑，多数是被真实运行修正过的判断。
 
-当前仓库包含产品范围、MVP 规格和技术架构文档；应用代码将在文档确认后开始搭建。
+---
 
-## 为什么做 RepoCoach
+## 一、成本
 
-很多开发者可以读懂单个函数，却很难快速建立一个陌生开源项目的整体心智模型。普通代码问答工具通常直接给答案，用户看似理解了，却没有形成能够在面试或贡献任务中复述、验证和迁移的理解。
+### 纸面推断错了两次，实测才对
 
-RepoCoach 的核心假设是：
+| 推断 | 实测 |
+|---|---|
+| 成本随轮次线性增长，5 问 ≈ 1.65M token | **超线性**：Zod 第 1 问 0.4M、第 2 问累计 1.26M、收尾 1.80M |
+| 减少工具往返次数就能降成本 | Hono 调用数降 28%，token **反升 17%** |
 
-> 真正的理解应该来自“预测 → 查看证据 → 解释 → 被追问 → 复述”的过程。
+第二条尤其值得记：**往返次数不是成本的因**。
 
-## MVP
+### 主成本是同一轮内的对话重发
 
-第一版只解决一个问题：
+浅克隆和 ripgrep 检索**不消耗 token**，单条工具结果硬上限 8 KiB。真正的开销是：一个 turn 里模型调 15–25 次工具，**每次调用都要重发整段对话**，包括本轮之前所有工具结果。
 
-> 用户能否在 15 分钟内理解并复述一个开源项目中的真实功能链路？
+Zod 实测（16 次 provider 调用）：总发出 1,168,610 字节，其中 **1,033,741（88.5%）是同轮内累积、被反复重发的工具结果**。成本随调用次数平方增长，与仓库大小只间接相关。
 
-核心流程：
+### 最反直觉的一条：预算在管一个错的量
 
-```text
-输入公开 GitHub URL
-  → 扫描仓库结构和入口文件
-  → 推荐可学习的功能路径
-  → 用户选择一个功能
-  → Agent 提问并让用户先预测
-  → Agent 检索源码证据
-  → 基于回答动态追问和纠错
-  → 输出调用链、薄弱点和下一步学习建议
+DeepSeek 的自动上下文缓存对**从第 0 个 token 起完全相同的前缀**生效，命中便宜一个数量级。Hono 实测：
+
+```
+input tokens      394,501
+cache hit tokens  258,944  (65.6%)   ← 便宜十倍
+cache miss tokens 135,557  (34.4%)   ← 真正计费的
 ```
 
-MVP 范围：
+而预算卡的是**总 prompt token**（320k）。**session 是被一个高估约 3 倍的数字提前掐断的。**
 
-- 公开 GitHub 仓库
-- TypeScript / JavaScript 项目
-- 单次只学习一个功能路径
-- 每次 Session 最多 3 个问题（可用 `--max-turns` 覆盖）；大仓库可能在 Token 预算耗尽时提前收尾，用 `--max-input-tokens` 抬高上限
-- 文本交互
-- 文件路径和行号引用
-- Session 可恢复
-- 只读分析，不执行目标仓库代码
+同一个数还被同时当成三样东西，三样都没管好：
 
-暂不包含：
+- **当成钱** —— 高估约 3 倍
+- **当成上下文窗口压力** —— 完全不相关，单次调用平均 13,150 token，只用了窗口约 10%
+- **当成工作量** —— 它随调用次数平方增长，与产出价值无关
 
-- 语音面试
-- 多 Agent
-- 完整代码 Wiki
-- 任意仓库代码执行
-- LeetCode 判题
-- 简历和职位描述分析
+它真正做到的只有"保证 session 会停下来"。**那叫熔断，不叫预算。** 正确做法是拆开：成本上限按 miss token + output token 计，熔断按调用次数或墙钟时间计，上下文压力目前根本不用管。
 
-详细规格见 [MVP Spec](./docs/mvp-spec.md)，技术方案见 [Architecture](./docs/architecture.md)。
+### 可复用：度量方式
 
-## Agent 的核心能力
+- `src/agent/loop.ts` —— 两个事件夹住一次调用：`provider_request`（请求前字节量、其中工具结果占多少、其中窗口可压缩的占多少）与 `provider_usage`（响应后的缓存命中/未命中拆分）
+- `src/eval/bench.ts` + `fixtures/benchmarks/real-repos.json` —— 钉死 commit SHA **和**功能候选的可重复基准，N 次取中位数与 (min–max)
 
-RepoCoach 需要逐步实现：
+**钉死候选是关键**：不钉的话模型每次自选不同功能、探索不同代码路径，两次运行的 token 总量根本不可比。我们为此白跑过一轮对比。
 
-- 仓库目录和文件分析
-- 只读源码搜索与读取
-- 基于证据的回答
-- 学习状态机
-- 苏格拉底式提问
-- 用户理解状态记录
-- 结构化输出和 Schema 校验
-- Agent traces、评估和回归测试
+---
 
-第一版使用 TypeScript + 自实现的 Agent tool loop，学习状态机、证据引用、Session 数据和评估逻辑全部由产品层实现。Pi SDK 作为后续 Agent runtime 的候选，在垂直切片验证核心假设后再评估接入。
+## 二、安全
 
-## 测试仓库
+### 构造性接地：让幻觉引用不可能，而不是事后检测
 
-开发和评估会分成两类仓库：
+`repo_save_evidence` 只接受本轮工具**真实返回过**的 (path, 行号范围)，服务端账本做交集校验。范围合法但内容未被读过的引用一律拒绝。
 
-1. `fixture-repo`：自建的小型 TypeScript 仓库，用于稳定的自动化测试。
-2. 真实开源项目：
-   - [Zod](https://github.com/colinhacks/zod)：验证小型源码库的证据引用和调用链追踪。
-   - [Hono](https://github.com/honojs/hono)：验证真实 Web 框架中的请求和路由链路。
-   - [Pi](https://github.com/badlogic/pi-mono)：后续验证 Agent runtime、工具和 Session 等复杂系统。
+实现：`src/evidence/ledger.ts`（账本）、`src/evidence/grounding.ts`（校验器）、`src/agent/tools.ts`（证据出口）。
 
-## 计划中的技术栈
+配套纪律比机制本身更容易出错：
 
-第一阶段（CLI 垂直切片）：
+- 截断只记**实际显示**的行（模型只看到半行就不能引用整行）
+- 跨轮携带的内容只认**真正带进上下文**的范围，降级为"只列 path"的不可引用
+- 批量提交仍需**逐条**校验，不允许整批放行
 
-- TypeScript
-- Zod（Schema 校验）
-- git 浅克隆 + ripgrep（源码检索，GitHub API 只用于仓库元数据）
-- JSON 文件 Session 持久化
-- 自实现 Agent tool loop
-- 模型：DeepSeek `deepseek-v4-flash`（API Key 放在仓库根目录 `.env.local`，已被 `.gitignore` 覆盖，不得提交）
+### 双闸，以及"同一道闸覆盖所有出口"
 
-第二阶段（假设验证通过后）：
+每条文件访问路径必须同时过 fs-guard（realpath 收敛在仓库根内，`src/reader/fs-guard.ts`）与 filters（扩展名白名单、路径黑名单、密钥文件名、文件名控制字符，`src/reader/filters.ts`）。四个出口——read-file / search / tree / package-info——无一例外。
 
-- Next.js + Tailwind CSS
-- PostgreSQL + Drizzle
-- Pi SDK / AgentSession（候选）
+历史缺陷全是同一形态：**闸本身正确，但漏了某个出口**。search 绕过 filters、package-info 裸读 `package.json`、字节上限只在 read_file 生效。
 
-具体实现会优先保持模块可替换，避免把 RepoCoach 的学习逻辑绑定在单一模型或 Agent runtime 上。
+### 最重要的实证：这类缺陷靠 checklist 拦不住
 
-## 本地开发
+17 个 PR 累计 35 轮复审、约 50 条意见，**近四分之一是同一形态**（字节上限那道闸被追了 5 轮）。写了六条自查清单之后仍然反复漏。
+
+原因很具体：**清单能提醒"检查覆盖面"，但替不了"类别边界在哪"这一步判断，而出错的正是后一步。**
+
+有效的是把覆盖面写成测试：
+
+| 方法 | 位置 | 作用 |
+|---|---|---|
+| 枚举式覆盖 | `test/coverage/` | 出口列表来自导出的常量/类型（`REPO_TOOL_DEFINITIONS`、`featureCandidateSchema.shape`），新增出口自动纳入或自动失败 |
+| 属性测试 | `test/property/` | `∀ 输入, byteLength(最终输出) ≤ 上限`，自动发现转义膨胀、边界差一位 |
+| 架构适应度 | `test/architecture/fitness.test.ts` | "哪些模块允许 import `node:fs` / `node:child_process` / 构造 data-guard 标记"写成**带书面理由的显式白名单**，遍历 `src/**` 断言无违例 |
+| 对抗性 fixture | `fixtures/fixture-adversarial/` | 一份同时攻击每道闸的语料，推过全部八条出口 |
+
+**对抗性 fixture 上线当天就找出一个 35 轮复审都没发现的缺陷**：tree 列表是"每行一个文件"，一个名字里带换行的文件会在模型看到的区块里伪造出多余条目——与伪造标记同一形态。修在路径闸，一处覆盖全部出口。
+
+### 其他闸
+
+- **仓库内容永远是数据**（`src/agent/data-guard.ts`）：包裹在 `REPO_DATA` 标记内，内容里的伪造标记被转义，**永不进 system prompt**
+- **终端输出中和**（`src/cli/markdown.ts`）：ESC/CSI/OSC、C0、C1、伪造的 markdown 标题
+- **子进程 argv**：固定数组、从不开 shell，用户输入经白名单校验或 `--` 隔离
+
+---
+
+## 三、KV cache
+
+**客户端实现不了 KV cache。** 它是推理时驻留在 GPU 显存里的张量，活在模型服务器内部。作为 API 客户端，唯一的抓手是**把请求前缀构造得稳定**（DeepSeek 自动缓存），或使用 provider 的显式缓存断点接口（Anthropic 的 `cache_control`，DeepSeek 没有）。
+
+### 一条可推广的 agent loop 设计规则
+
+**稳定内容在前，易变内容在后；per-turn 状态绝不能写进 system prompt。**
+
+我们违反了它：`src/agent/system-prompt.ts` 把 `Current phase: ${phase}` 和阶段专属指令写进第 0 条消息，而 phase 每轮都变——**每次阶段转换，整轮缓存从头作废**。
+
+同轮内命中率还有 66%，是因为工具循环只追加、前缀稳定；跨轮几乎全丢，因为每轮重建消息数组。
+
+### 一条反直觉推论
+
+跨轮把历史压成摘要以省 token（本项目 issue #25 做的），**在缓存存在时这笔账可能是反的**：原始历史是稳定前缀（1/10 价），新生成的摘要是全价新 token。
+
+**省 token 的优化，可能是涨成本的优化。** 这个假设我们没来得及验证，但值得任何做 agent loop 的人先想一遍。
+
+### 顺带暴露的设计缺口
+
+`ChatProvider` 接口没有缓存断点的概念（`{messages, tools}` 进、`{message, usage, cache}` 出）。所以"provider 可替换"这个目标在缓存这一维上并不成立——DeepSeek 的自动缓存把它盖住了，换到需要显式标记的 provider 才会暴露。
+
+### 换 key 会怎样
+
+DeepSeek 缓存**按账号隔离**，换成另一个账号的 key 即冷启动；不再使用的缓存"几小时到几天"内清除。所以隔夜再跑同一基准，前几次调用是冷的——**做前后对比时这是个真实的干扰源**。
+
+---
+
+## 四、数据 / 状态
+
+反复出现的同一类缺陷：**只活在内存或局部作用域的状态，resume 时就没了。** 中过四次——commit SHA、workspace 选择、累计 token usage、轮数与预算覆盖。
+
+正确的自查问法**不是**"本次有没有新增状态字段"（我曾因此漏判 workspace——字段早就存在，只是 session 层没保存），而是：
+
+> **首次运行时影响行为的每个变量，resume 时拿得到吗？**
+
+只活在内存里的决策值就是缺陷。
+
+相关：`src/store/json-store.ts`（会话持久化）、`src/domain/index.ts`（schema，新增字段一律 optional 以兼容旧文件）。
+
+另一条：**测试普遍注入依赖，导致"没注入时用什么"的默认装配分支从未被执行**。fixture-monorepo 曾因此拿到 fixture-repo 的候选，而测试全绿。凡新增默认路由，必须有**不注入**该依赖的装配级测试。
+
+---
+
+## 五、Prompt
+
+### prompt 里的约束必须配一道出口闸
+
+"功能候选只能是仓库里已存在的调用链，不能是新增功能或重构建议"——写进 prompt 后模型照样违反。最终稳住靠的是出口的三道校验：祈使动词检测（Add / Implement / Refactor 开头即拒）、符号接地（描述里点名的符号必须能在给定文件中找到）、文件存在性过滤。
+
+**通用规律：prompt 表达意图，出口闸保证性质。** 只写 prompt 等于没约束。
+
+### 状态归应用层，模型碰不到
+
+`AgentDecision` 用 `.strict()` 拒绝任何未知字段，包括 `phase`——模型输出的 `nextAction` 只是**建议**，转不转由 Orchestrator 裁决（`src/orchestrator/orchestrator.ts`）。
+
+### 模型输出必然不合规，要有降级路径
+
+`src/agent/json-repair.ts` 处理宽松 JSON 与双层 `{"arguments": {...}}` 包装；schema 校验失败把纠错信息作为工具结果喂回去重试；重试耗尽后，若 session 已有值得复盘的内容就合成一份最小复盘，而不是把用户的进度扔掉。
+
+---
+
+## 六、协作流程：CC 驱动 DS、GPT review
+
+这块没什么现成资料，实测经验如下。
+
+### 可用配置
+
+```bash
+# 在目标 worktree 内
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
+ANTHROPIC_AUTH_TOKEN=<key> \
+ANTHROPIC_MODEL=deepseek-v4-pro \
+claude -p --verbose --output-format stream-json \
+  --allowedTools "Read,Write,Edit,Glob,Grep,Bash(pnpm:*),Bash(git commit:*),..." \
+  < prompt.txt
+```
+
+- **prompt 必须走 stdin**：headless 后台管道下位置参数不生效
+- **工具白名单不给 `git push`**：实现方只能 commit，push / 开 PR 由 review 方在验收后执行
+- **每个任务独立 git worktree**，失败可安全重跑
+- **不要并发**：两个 headless 进程同时跑曾双双死于 socket 错误
+- **成本**：一次实现类委托约 ¥3
+
+### 必须知道的坑：退出码会骗人
+
+进程**退出码 0**、输出里写着 `"subtype": "success"`，同一条记录里却是：
+
+```json
+{"is_error": true, "api_error_status": 402, "result": "API Error: 402 Insufficient Balance"}
+```
+
+一个工具调用都没跑，worktree 空空如也。**必须查 payload，不能只看退出码。**
+
+### 委托产出的质量形态（最值钱的一条）
+
+DeepSeek 的代码结构基本正确，但反复交付**看起来完成、其实是假的**东西：
+
+- 基准配置里的 commit SHA 是**全零占位符**——通过了 40-hex 正则，却不指向任何 commit
+- 入口文件路径 404，而 harness **照样能跑**（首轮摘要为空、模型从零探索），于是"钉死候选"的基准悄悄退化成它本要取代的那种不可重复运行
+- 测试**手工复刻**被测渲染逻辑而不调用它——将来有人加第五个字段绕过闸门，测试照样绿
+- fixture 里生成了四个攻击面，却没有任何断言读它们，而文件头注释声称"driven through 全部出口"
+
+**"编译过、测试绿"与"基准指向一个不存在的 commit"完全兼容。** 委托产出需要核对**事实**，不只是看测试状态。我用 GitHub API 核路径、核 SHA，才发现这些。
+
+对应的防御：给配置加"全零 SHA 即拒绝"的校验、在花掉第一次模型调用**之前**断言入口文件可读、让测试走真实入口而不是复刻逻辑。
+
+### review 方自己的失误也要记
+
+- **三次写"实测"探针时绕过真实入口**，自己拼输入或复刻输出逻辑，得出错误结论并写进 PR。一次报了"预算正确"，实际超标 3 倍。**自己拼的"实测"比不测更危险**——它让所有人以为这个面已覆盖
+- **误诊过一次根因**：assessment 一致率 28.6%，判成"模型评判太严"并提了 rubric 修改，实际是活会话里按回答文本配对导致对照无效。改成隔离 judge 模式后 100%
+- **PR 承诺的测量没做就合并了**：写明"合并前补上真实仓库数据"，PR 先行合并、issue 被关
+
+### 三方分工的实际效果
+
+Claude 定计划 / 拆 issue / review / 验收 / push，DeepSeek 实现，GPT 外部复审。**外部复审确实抓到了 Claude 漏掉的东西**（如 resume 时已超预算仍会先调一次模型），说明同一个模型既写又审存在盲区。
+
+---
+
+## 停止开发的考量
+
+决定不再继续，是三方面权衡的结果。
+
+**一、产品侧的差异化空间有限。** 目标用户（准备面试、想给开源提 PR 的开发者）大概率已经在用 Claude Code 这类通用编码 agent。用它开一个 session 配几个 markdown 文件，可以覆盖 RepoCoach 目前提供的大部分价值，而且能轻松读完 200 个文件的仓库——我们的 session 还跑不完（Hono 实测完成 1 问，Zod 0–1 问）。
+
+设想的三条差异化，逐条评估下来都不够厚：
+
+| 设想优势 | 评估 |
+|---|---|
+| 结构性防剧透（状态机攥住 phase） | 一条 `CLAUDE.md` 规则大致可以替代 |
+| 学习记录可累积 | markdown 文件在可 grep / 可版本控制 / 可迁移上更好；而且我们只落了数据，还没有功能在用它 |
+| 引用在架构上不可伪造 | 这个场景下用户本来就在读代码，自己能核对，保证与"通常没问题"的差价换不来采用 |
+
+**二、工程侧剩余的优化收益在收敛。** 成本方向的主要发现已经拿到（重发占比、超线性增长、预算口径、缓存命中率），剩下的工作是按这些结论做参数调优与结构调整，属于确定性的执行，边际信息量不高。真正有推广价值的结论已经在上面六节里了。
+
+**三、验证路径本身需要重做。** 核心假设是"**比**直接生成代码总结更有效"，而现有 eval 的全部指标（Evidence precision、Path accuracy、Adaptation）都是 RepoCoach 和自己比，**没有对照组**。要回答这个"比"字，需要重新设计与通用 agent 的对照实验。即使成本问题解决，现有度量体系也支撑不了这个判断——这意味着继续投入之前还要先补一段方法论工作。
+
+三条叠加，继续投入的 ROI 不足以支撑，因此在这里收尾。
+
+**一条过程教训值得单独记：产品价值的压力测试做得太晚。** 项目从"技术可行性评估"直接进入实现，做完 39 个 issue 才系统地问"为什么用户要选它"。可行性评估本应同时覆盖技术与价值两侧——如果这一问提前到第一周，上面三条里的至少两条会更早浮现。
+
+---
+
+## 值得抄走的三块
+
+1. **构造性接地** —— `src/evidence/`。任何需要"模型引用必须可信"的 agent 都用得上
+2. **agent loop 的成本度量** —— `provider_request` / `provider_usage` 两个事件 + `eval:bench` 的钉死基准。上面成本与 cache 的全部结论来自它们
+3. **闸门覆盖的测试方法** —— `test/coverage/`、`test/property/`、`test/architecture/fitness.test.ts`、`fixtures/fixture-adversarial/`
+
+---
+
+## 本地运行
 
 ```bash
 pnpm install
-pnpm test        # 全部单测（mock，不发网络请求）
+pnpm test        # 638 个测试，全部 mock，不发网络请求
 pnpm build
 ```
 
-## 运行 CLI
-
-需要仓库根目录有 `.env.local`（一行 `Deepseek_key=<你的 DeepSeek API Key>`）。真实模型为 `deepseek-v4-flash`。
+跑真实模型需要仓库根目录有 `.env.local`（一行 `Deepseek_key=<key>`）。
 
 ```bash
-# 开始一次学习 Session（GitHub URL 或本地路径；fixture 走本地路径）
-pnpm start -- start ./fixtures/fixture-repo
-
-# 中断（Ctrl-C 或 /quit）后恢复
-pnpm start -- resume <sessionId>
-
-# 列出历史 Session（id、仓库、阶段、耗时）
-pnpm start -- list
-
-# 查看某个 Session 已保存的问答与证据（error / abandoned 结束后也能看）
-pnpm start -- show <sessionId>
+pnpm start -- start ./fixtures/fixture-repo   # 开始一次 Session（也支持 GitHub URL）
+pnpm start -- resume <sessionId>              # 中断后恢复
+pnpm start -- list                            # 历史 Session
+pnpm start -- show <sessionId>                # 查看已保存的问答与证据
 ```
 
-- 问答中直接回车 = 跳过本题；输入 `/quit` 提前结束。
-- Session 按轮持久化在 `~/.repocoach`（可用 `--data-dir` 覆盖），Ctrl-C 不丢进度。
-- 等待模型时工具调用过程会流式打印在 stderr。
+- 问答中直接回车 = 跳过本题；`/quit` 提前结束
+- Session 按轮持久化在 `~/.repocoach`（`--data-dir` 可覆盖），Ctrl-C 不丢进度
+- `--max-turns` / `--max-input-tokens` / `--max-output-tokens` 覆盖默认限制
 
-## 评估 (Eval)
-
-`src/eval/` 把此前手动做的事（管道灌答案、跑真模型、人工读日志算指标）自动化成可重复的 harness，并作为后续 #25 成本优化的测量仪器。它复用真实装配路径（含强制接地），产出两种测量：
-
-- **活会话 eval（live session）**：用脚本化回答驱动完整 Session，按 `fixtures/expectations/` 的标注计算 Evidence precision、Path accuracy、Adaptation、Hallucination、单 Session 成本五项。
-- **judge 模式（judge eval）**：单独测量**评判函数**的 Assessment 一致率。活会话里模型会自己生成问题，无法按回答文本与标注配对（同一脚本回答会被喂给多个不同的模型问题，对照无效）。judge 模式把每条标注样本的 (question, userAnswer) 原样交给评判函数——复用真实的 system prompt 与 rubric、允许只读工具检索证据——只输出 assessment，再与标注逐条比对。
-
-指标口径：
-
-- **Evidence precision**：按「至少一个被引用的符号落在引用范围内」判定支持；reason 未声称任何符号的条目计为「不适用」（不计入分母），并在报告中单独列出供人工核查。
-- **Path accuracy**：期望调用链作为**子序列**匹配实际证据路径顺序（允许混入 README、类型定义等非链路文件）。
-- **Assessment 一致率（judge 模式）**：除一致率外还输出**混淆矩阵**（标注 × 模型判定）与分歧明细（明细同时显示标注问题与模型看到的问题，二者在 judge 模式下相同，防止再次出现按回答文本错配却不自知）。注意 `fixtures/expectations/answer-samples.json` 的标注是预置的；若出现持续性系统偏差，应先复核标注本身，而非直接判定模型不合格。
-- **Hallucination**：符号抽取只保留具备代码上下文的标识符（反引号包裹、camelCase/PascalCase、`name(` 调用、`path.ts` 文件名），散文中的全大写强调词（如 PARSE / VALIDATE）不再被当作符号。
+### 评估
 
 ```bash
-pnpm build          # eval 脚本运行的是构建产物 dist/eval/bin.js，需先 build
-
-# 确定性 mock provider 跑 fixture，验证 harness 与指标计算本身（CI 跑这个，无需 API key）
-pnpm eval:mock
-
-# 真实 DeepSeek provider 跑 fixture，产出真实指标报告（需要 .env.local，不在 CI 跑）
-pnpm eval:real
+pnpm build
+pnpm eval:mock    # 确定性 mock provider（CI 跑这个，无需 API key）
+pnpm eval:real    # 真实 provider 跑 fixture
+pnpm eval:bench   # 真实仓库成本对比，钉死 SHA + 候选，N 次取中位数
 ```
 
-两种模式每次都同时跑「活会话 eval」与「judge eval」，只有 provider 不同。输出两份：stdout 的人类可读表格（分两节），以及仓库根目录 `eval-report.json`（机器可读，含完整 run——每轮的问题/回答/assessment/evidence/usage——供事后诊断与优化前后对比；已加入 `.gitignore`）。可用 `node dist/eval/bin.js mock --out <path>` 覆盖 JSON 输出位置。
+`eval:bench` **不进 CI**：每次运行都是真实模型调用、花真钱。用法是"改动前跑一次、改动后跑一次"，再 diff 两份 `bench-report.json`。
 
-### 真实仓库成本对比（bench）
-
-`pnpm eval:bench` 用 `fixtures/benchmarks/real-repos.json` 里的钉死基准做**可重复**的成本对比。每条基准把仓库钉到某个 commit SHA、把功能钉到固定的 `(featureId, featureGoal, entryFiles)` 三元组，再喂脚本化答案——这样同一基准的每次 run 都探索同一条代码路径，改动前后才有可比性。每条基准跑 N 次，每项指标报告**中位数与 (min–max)**（而不是单次值或平均值，避免单个离群 run 带偏）。
-
-```bash
-pnpm build                       # bench 脚本同样跑 dist/eval/bin.js
-
-pnpm eval:bench                  # 跑全部基准，每条 3 次，JSON 写到 bench-report.json
-pnpm eval:bench --runs 5 --benchmark zod --out /tmp/zod.json
-```
-
-**这个模式不进 CI**：每次运行都是真实模型调用、花真钱。它是手动触发的对比工具，用法是「改动前跑一次、改动后跑一次」，再 diff 两份 `bench-report.json`（JSON 保留每次 run 的原始值，不只存汇总）。
+---
 
 ## 文档
 
-- [MVP 规格](./docs/mvp-spec.md)
-- [架构设计](./docs/architecture.md)
+- [架构设计](./docs/architecture.md) —— agent 的结构：四个组件、一轮的完整数据流、状态机与安全边界。开头有一节速览，读完就能建立整体印象
+- [MVP 规格](./docs/mvp-spec.md) —— 原始产品规格与用户流程
 
 ## 开源协议
 
-项目计划使用 MIT License，正式发布前会补充许可证文件。
-
+MIT（许可证文件待补）。
