@@ -101,6 +101,7 @@ export async function runEval(
       featureGoal,
       answers: [prediction.userAnswer, followUp.userAnswer],
       carry: options.carry,
+      entryFiles: candidate.entryFiles,
     });
     const correctRun = await runEvalSession({
       asm,
@@ -110,6 +111,7 @@ export async function runEval(
       featureGoal,
       answers: [prediction.userAnswer],
       carry: options.carry,
+      entryFiles: candidate.entryFiles,
     });
     const incorrectRun = await runEvalSession({
       asm,
@@ -119,6 +121,7 @@ export async function runEval(
       featureGoal,
       answers: [INCORRECT_PREDICTION_ANSWER],
       carry: options.carry,
+      entryFiles: candidate.entryFiles,
     });
 
     const knownSymbols = callChain.map((step) => step.symbol);

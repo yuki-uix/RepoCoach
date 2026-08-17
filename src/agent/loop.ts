@@ -6,6 +6,11 @@
  * input, then repeatedly calls the provider, executes tool calls (wrapping
  * every repo result in REPO_DATA markers), and stops when the model submits a
  * schema-valid decision via submit_decision. See docs/architecture.md §3, §5.
+ *
+ * Every injected content kind's cap and data-guard `kind` string is read from
+ * the INJECTED_MESSAGE_KINDS registry in message-kinds.ts (never hardcoded
+ * here), so the enumerated coverage test can iterate the same single source of
+ * truth the loop assembles from.
  */
 
 import {
@@ -31,12 +36,8 @@ import {
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { formatZodError } from "./errors.js";
 import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
-import {
-  MAX_CARRIED_CONTEXT_BYTES,
-  MAX_HISTORY_SUMMARY_BYTES,
-  MAX_TOOL_RESULT_BYTES,
-  byteLength,
-} from "./limits.js";
+import { byteLength } from "./limits.js";
+import { injectedMessageKind } from "./message-kinds.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type {
@@ -53,6 +54,18 @@ import {
   type ToolRegistry,
 } from "./tools.js";
 import { SessionReadCache, buildCarriedBlock } from "./read-cache.js";
+import { buildEntryOutline, type EntryOutline } from "./entry-outline.js";
+
+/**
+ * The injected-message kinds this loop assembles, looked up once from the single
+ * registry in message-kinds.ts. The loop never hardcodes a cap or a data-guard
+ * `kind` string: `injectedMessageKind` throws on an unknown id, so a new
+ * injection site must first register its kind there — which is exactly the table
+ * the enumerated coverage test iterates (issue #31).
+ */
+const REPO_TOOL_RESULT_KIND = injectedMessageKind("repo_tool_result");
+const TURN_HISTORY_KIND = injectedMessageKind("turn_history");
+const CARRIED_BLOCK_KIND = injectedMessageKind("already_read");
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -84,7 +97,8 @@ export type AgentLoopEvent =
       /** 0-based turn index the read happened in. */
       turnIndex: number;
     }
-  | { type: "carried_context"; bytes: number; turnIndex: number };
+  | { type: "carried_context"; bytes: number; turnIndex: number }
+  | { type: "entry_outline"; bytes: number; turnIndex: number };
 
 export interface AgentLoopOptions {
   provider: ChatProvider;
@@ -110,6 +124,14 @@ export interface AgentLoopOptions {
    * measure both arms of the A/B comparison.
    */
   carryReadContext?: boolean;
+  /**
+   * Entry files of the feature being learned (from the selected candidate).
+   * When set, the first turn preloads a byte-capped structure outline of their
+   * top-level exported symbols (names + line numbers) so the model can locate
+   * symbols without exploratory searches (issue #29). The outline is
+   * data-guard-wrapped and never recorded into the ledger.
+   */
+  entryFiles?: string[];
   logger?: AgentLogger;
   onEvent?: (event: AgentLoopEvent) => void;
 }
@@ -177,11 +199,16 @@ export class AgentLoop {
   private readonly ledger?: ToolReturnLedger;
   private readonly readCache: SessionReadCache;
   private readonly carryReadContext: boolean;
+  private readonly entryFiles?: string[];
+  private readonly reader: Reader;
+  private readonly repo: Repository;
   private readonly logger: AgentLogger;
   private readonly onEvent?: (event: AgentLoopEvent) => void;
   private readonly allTools: ToolDefinition[];
   /** 0-based turn index of the invoke currently running (set at invoke start). */
   private currentTurnIndex = 0;
+  /** Memoized first-turn entry outline; built lazily once per loop instance. */
+  private entryOutline: Promise<EntryOutline | null> | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -189,6 +216,9 @@ export class AgentLoop {
     this.ledger = options.ledger;
     this.readCache = options.readCache ?? new SessionReadCache();
     this.carryReadContext = options.carryReadContext ?? true;
+    this.entryFiles = options.entryFiles;
+    this.reader = options.reader;
+    this.repo = options.repo;
     this.tools = createToolRegistry({
       reader: options.reader,
       repo: options.repo,
@@ -221,7 +251,7 @@ export class AgentLoop {
     this.evidenceValidator?.setTurnIndex?.(input.turnHistory.length);
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     const collectedEvidence: Evidence[] = [];
-    const messages = this.buildInitialMessages(input);
+    const messages = await this.buildInitialMessages(input);
 
     let decisionRetries = 0;
     let forceMessageAdded = false;
@@ -315,7 +345,7 @@ export class AgentLoop {
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
-            content: capRepoData(stray, { tool: toolCall.name }, MAX_TOOL_RESULT_BYTES),
+            content: capRepoData(stray, { tool: toolCall.name }, REPO_TOOL_RESULT_KIND.cap),
           });
           continue;
         }
@@ -337,6 +367,8 @@ export class AgentLoop {
         //     error results) → MAX_TOOL_RESULT_BYTES via capRepoData;
         //   - cross-turn carried block → MAX_CARRIED_CONTEXT_BYTES via
         //     buildCarriedBlock (already wraps + hard-caps before this point).
+        // Each cap is read from the INJECTED_MESSAGE_KINDS registry, not
+        // hardcoded here (see message-kinds.ts).
         const result =
           args === undefined
             ? "Error: tool arguments are not valid JSON"
@@ -344,14 +376,14 @@ export class AgentLoop {
                 name: toolCall.name,
                 args,
                 collectedEvidence,
-                maxBytes: MAX_TOOL_RESULT_BYTES - repoDataWrapperOverhead(meta),
+                maxBytes: REPO_TOOL_RESULT_KIND.cap - repoDataWrapperOverhead(meta),
               });
         this.emit({ type: "tool_result", name: toolCall.name, result });
         this.logger.debug("agent tool result", { tool: toolCall.name });
         messages.push({
           role: "tool",
           toolCallId: toolCall.id,
-          content: capRepoData(result, meta, MAX_TOOL_RESULT_BYTES),
+          content: capRepoData(result, meta, REPO_TOOL_RESULT_KIND.cap),
         });
       }
     }
@@ -362,7 +394,7 @@ export class AgentLoop {
     );
   }
 
-  private buildInitialMessages(input: AgentInvokerInput): ChatMessage[] {
+  private async buildInitialMessages(input: AgentInvokerInput): Promise<ChatMessage[]> {
     const messages: ChatMessage[] = [
       { role: "system", content: buildSystemPrompt(input.phase, input.featureGoal) },
     ];
@@ -373,8 +405,19 @@ export class AgentLoop {
       // copied-through instructions re-enter context as unmarked directives.
       messages.push({
         role: "user",
-        content: wrapUntrustedContext(history, { kind: "turn_history" }),
+        content: wrapUntrustedContext(history, { kind: TURN_HISTORY_KIND.kind }),
       });
+    }
+    // First turn only: preload a structural outline of the candidate's entry
+    // files so the model locates symbols without exploratory searches (issue
+    // #29). The block is already UNTRUSTED_DATA-wrapped (and hard-capped at
+    // MAX_ENTRY_OUTLINE_BYTES) inside the builder, so it is pushed verbatim.
+    if (input.turnHistory.length === 0) {
+      const outline = await this.entryOutlineBlock();
+      if (outline !== null) {
+        messages.push({ role: "user", content: outline.content });
+        this.emit({ type: "entry_outline", bytes: outline.bytes, turnIndex: 0 });
+      }
     }
     const carried = this.buildCarriedContextBlock(input.turnHistory.length);
     if (carried !== null) {
@@ -384,6 +427,25 @@ export class AgentLoop {
     }
     messages.push({ role: "user", content: buildTurnInstruction(input) });
     return messages;
+  }
+
+  /**
+   * Build (and memoize) the first-turn entry outline. Returns null when no
+   * entry files are configured or none resolve to exported symbols. An outline
+   * failure is non-fatal — it is a navigation aid, never a requirement — so the
+   * builder's own per-file error handling plus this catch keeps it from ever
+   * aborting a turn.
+   */
+  private entryOutlineBlock(): Promise<EntryOutline | null> {
+    if (this.entryFiles === undefined || this.entryFiles.length === 0) {
+      return Promise.resolve(null);
+    }
+    if (this.entryOutline === undefined) {
+      this.entryOutline = buildEntryOutline(this.reader, this.repo, this.entryFiles).catch(
+        () => null,
+      );
+    }
+    return this.entryOutline;
   }
 
   /**
@@ -400,7 +462,7 @@ export class AgentLoop {
     if (!this.carryReadContext || turnIndex === 0 || this.readCache.ranges.length === 0) {
       return null;
     }
-    const built = buildCarriedBlock(this.readCache.ranges, MAX_CARRIED_CONTEXT_BYTES);
+    const built = buildCarriedBlock(this.readCache.ranges, CARRIED_BLOCK_KIND.cap);
     // Only the ranges whose content actually landed in context are citable —
     // `buildCarriedBlock` returns exactly those after its hard cap, so any entry
     // it dropped is never recorded as carried (the model never saw its content).
@@ -503,6 +565,21 @@ function buildTurnInstruction(input: AgentInvokerInput): string {
   return "Proceed with the current phase.";
 }
 
+/**
+ * Fixed bytes `wrapUntrustedContext` adds around the turn-history summary (the
+ * header + warning + closing marker scaffolding). The summary is billed against
+ * `MAX_HISTORY_SUMMARY_BYTES` minus this overhead so the *wrapped* message the
+ * loop sends stays within the terminal cap — the same "reserve the wrapper
+ * before fitting the content" discipline the tool results, carried block and
+ * entry outline already follow.
+ */
+const HISTORY_WRAPPER_OVERHEAD = byteLength(
+  wrapUntrustedContext("", { kind: TURN_HISTORY_KIND.kind }),
+);
+
+/** Raw-bytes budget for the un-wrapped summary, wrapper overhead already off. */
+const HISTORY_CONTENT_BUDGET = TURN_HISTORY_KIND.cap - HISTORY_WRAPPER_OVERHEAD;
+
 export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   if (turns.length === 0) {
     return null;
@@ -511,8 +588,12 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   const full = `${prefix}${turns.map(formatTurnLine).join("\n")}`;
   // Turn fields are model-generated from repo content, so they are later
   // escaped by `wrapUntrustedContext`. Bill their escaped size, or marker-heavy
-  // feedback/question text would inflate past the cap after escaping.
-  if (escapedByteLength(full) <= MAX_HISTORY_SUMMARY_BYTES) {
+  // feedback/question text would inflate past the cap after escaping — and bill
+  // against the budget that already reserves the wrapper's fixed overhead, so
+  // the *wrapped* message the loop actually sends stays within
+  // MAX_HISTORY_SUMMARY_BYTES (issue #31: this was the one message kind whose
+  // cap covered raw content only, letting the wrapper push it over).
+  if (escapedByteLength(full) <= HISTORY_CONTENT_BUDGET) {
     return full;
   }
   // Cap the summary: keep the most recent turns in full and collapse the older
@@ -521,7 +602,7 @@ export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   // `omitted`, so it can never exceed the marker for `turns.length`); without
   // that reservation the marker pushes the joined string over the cap.
   const maxOlderBytes = byteLength(`… ${turns.length} earlier turn(s) omitted (see session file)\n`);
-  const budget = MAX_HISTORY_SUMMARY_BYTES - byteLength(prefix) - maxOlderBytes;
+  const budget = HISTORY_CONTENT_BUDGET - byteLength(prefix) - maxOlderBytes;
   const kept: string[] = [];
   let keptBytes = 0;
   let index = turns.length - 1;

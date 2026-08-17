@@ -91,6 +91,12 @@ export interface BuildOrchestratorOptions {
    * Defaults to true; `false` reproduces pre-optimisation behaviour for A/B.
    */
   carryReadContext?: boolean;
+  /**
+   * Entry files of the selected feature candidate. When set, the loop preloads
+   * a byte-capped structure outline of their top-level exports on the first
+   * turn (issue #29).
+   */
+  entryFiles?: string[];
 }
 
 export interface SessionAssembly {
@@ -166,6 +172,7 @@ export function assembleSession(deps: AssembleDeps = {}): SessionAssembly {
         evidenceValidator: validator,
         ledger,
         carryReadContext: opts?.carryReadContext,
+        entryFiles: opts?.entryFiles,
         onEvent,
       });
       // A resumed session carries its cumulative token usage; pass it through so

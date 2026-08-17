@@ -140,7 +140,7 @@ describe("evidence grounding end-to-end", () => {
 
     // The model really received the rejection before re-deciding.
     const toolResult = requests[1].messages.find((m) => m.role === "tool")?.content ?? "";
-    expect(toolResult).toContain("evidence rejected");
+    expect(toolResult).toContain("rejected src/export/csv.ts lines 1-5");
     expect(toolResult).toContain("src/export/csv.ts");
     expect(toolResult).toContain("1-5");
   });

@@ -27,19 +27,23 @@ export interface RunSessionOptions {
   answers: string[];
   /** Cross-turn read-cache carry (default true); false = pre-#25 behaviour. */
   carry?: boolean;
+  /** Entry files of the feature candidate (preloads the first-turn outline). */
+  entryFiles?: string[];
 }
 
 export async function runEvalSession(options: RunSessionOptions): Promise<EvalRun> {
-  const { asm, repo, repositoryPath, featureId, featureGoal, answers, carry } = options;
+  const { asm, repo, repositoryPath, featureId, featureGoal, answers, carry, entryFiles } = options;
   const carryReadContext = carry ?? true;
   const session = asm.store.createSession({ repositoryId: repositoryPath, featureId });
 
   // Instrument the loop via its event stream: tool-call counts, content-returning
-  // reads (for the repeated-reads metric) and per-turn carried bytes. These are
-  // counts the harness records while the loop runs; they never alter behaviour.
+  // reads (for the repeated-reads metric), per-turn carried bytes, and the
+  // first-turn entry outline bytes. These are counts the harness records while
+  // the loop runs; they never alter behaviour.
   const toolCalls = new Map<string, number>();
   const reads: ReadOccurrence[] = [];
   const carriedBytes: number[] = [];
+  const entryOutlineBytes: number[] = [];
   const onEvent = (event: AgentLoopEvent): void => {
     switch (event.type) {
       case "tool_call_started":
@@ -56,6 +60,9 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
       case "carried_context":
         carriedBytes.push(event.bytes);
         break;
+      case "entry_outline":
+        entryOutlineBytes.push(event.bytes);
+        break;
       default:
         break;
     }
@@ -66,7 +73,7 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
     session.id,
     featureGoal,
     onEvent,
-    { carryReadContext },
+    { carryReadContext, entryFiles },
   );
 
   const turns: EvalTurn[] = [];
@@ -138,5 +145,7 @@ export async function runEvalSession(options: RunSessionOptions): Promise<EvalRu
     toolCalls: Object.fromEntries(toolCalls),
     repeatedReads: repeatedReadCount(reads),
     carriedBytes,
+    saveEvidenceCalls: toolCalls.get("repo_save_evidence") ?? 0,
+    entryOutlineBytes,
   };
 }

@@ -20,7 +20,8 @@
  * - repo_read_file  → fitSourceLines (escaped measure) over the numbered content,
  *                     with escaped header and note bytes reserved up front (+ note)
  * - repo_get_package_info → truncateEscapedBytes over the JSON summary (+ note)
- * - repo_save_evidence → truncateEscapedBytes over the receipt / rejection string
+ * - repo_save_evidence → fitReceiptLines (escaped measure) over the per-item
+ *                         accepted/rejected receipt (+ note when cut)
  * - the outer catch → truncateEscapedBytes over `Error: <message>`; the small
  *                     schema-error / unknown-tool strings are constant-bounded
  */
@@ -112,6 +113,17 @@ const readFileArgsSchema = z.object({
   endLine: z.number().int().positive().optional(),
 });
 
+/**
+ * repo_save_evidence accepts either the batched form (`items: Evidence[]`, the
+ * shape the tool definition advertises) or a single evidence object (kept for
+ * backward compatibility with direct callers and older tests). Both normalise
+ * to a list that is then validated item by item.
+ */
+const saveEvidenceArgsSchema = z.union([
+  evidenceSchema,
+  z.object({ items: z.array(evidenceSchema).min(1) }),
+]);
+
 const repoGetTreeTool: ToolDefinition = {
   type: "function",
   function: {
@@ -178,20 +190,48 @@ const repoSaveEvidenceTool: ToolDefinition = {
   function: {
     name: "repo_save_evidence",
     description:
-      "Record a piece of evidence (file path + line range + reason) you retrieved this turn. Only accepted when it passes validation. Before citing package.json or any file content, you must first repo_read_file that range.",
+      "Record the evidence (file path + line range + reason) you retrieved this turn. Submit ALL of this turn's evidence in ONE call by passing it as the `items` array — do not call once per item. Each item passes validation individually; the response lists which items were accepted and which were rejected (with a reason) so you can correct only the rejects. Before citing package.json or any file content, you must first repo_read_file that range.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
-        startLine: { type: "integer", minimum: 1 },
-        endLine: { type: "integer", minimum: 1 },
-        reason: { type: "string" },
+        items: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              startLine: { type: "integer", minimum: 1 },
+              endLine: { type: "integer", minimum: 1 },
+              reason: { type: "string" },
+            },
+            required: ["path", "startLine", "endLine", "reason"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["path", "startLine", "endLine", "reason"],
+      required: ["items"],
       additionalProperties: false,
     },
   },
 };
+
+/**
+ * The five repo tool definitions, in registration order. Exported so coverage
+ * tests enumerate the tool exits from the exact same list the registry builds
+ * from — a tool added here is automatically exercised by
+ * `test/coverage/tool-exit-byte-cap.test.ts`, so a new exit can never be missed
+ * by a hand-maintained test array. `submit_decision` is deliberately absent: it
+ * is the loop's terminal tool (its arguments ARE the decision), not a repo tool
+ * returning untrusted data through `capRepoData`.
+ */
+export const REPO_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+  repoGetTreeTool,
+  repoSearchTool,
+  repoReadFileTool,
+  repoGetPackageInfoTool,
+  repoSaveEvidenceTool,
+];
 
 /** Build the tool registry bound to a Reader + Repository pair. */
 export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
@@ -208,13 +248,7 @@ export function createToolRegistry(runtime: ToolRuntime): ToolRegistry {
   }
 
   return {
-    definitions: [
-      repoGetTreeTool,
-      repoSearchTool,
-      repoReadFileTool,
-      repoGetPackageInfoTool,
-      repoSaveEvidenceTool,
-    ],
+    definitions: [...REPO_TOOL_DEFINITIONS],
     execute,
   };
 }
@@ -268,28 +302,76 @@ function executeTool(
     }
 
     case "repo_save_evidence": {
-      const parsed = evidenceSchema.safeParse(execution.args);
+      const parsed = saveEvidenceArgsSchema.safeParse(execution.args);
       if (!parsed.success) {
         return `Error: invalid evidence: ${formatZodError(parsed.error)}`;
       }
-      const verdict = validator.validate(parsed.data);
-      if (!verdict.ok) {
-        return truncateEscapedBytes(
-          `Error: evidence rejected: ${verdict.reason}`,
-          cap,
-        ).text;
-      }
-      execution.collectedEvidence.push(parsed.data);
-      const evidence = parsed.data;
-      return truncateEscapedBytes(
-        `Saved evidence: ${evidence.path} lines ${evidence.startLine}-${evidence.endLine} (${evidence.reason})`,
-        cap,
-      ).text;
+      const items = "items" in parsed.data ? parsed.data.items : [parsed.data];
+      return saveEvidence(validator, execution, items, cap);
     }
 
     default:
       return `Error: unknown tool: ${execution.name}`;
   }
+}
+
+/**
+ * Validate and record a batch of evidence items. Every item is validated
+ * individually (constructive grounding is never relaxed by batching): accepted
+ * items are appended to the turn's list, rejected items are reported one line
+ * each with their reason so the model can correct only the rejects. The whole
+ * receipt is fitted to the byte budget one line at a time so a truncation never
+ * cuts a rejection reason in half.
+ */
+function saveEvidence(
+  validator: EvidenceValidator,
+  execution: ToolExecution,
+  items: Evidence[],
+  cap: number,
+): string {
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+  for (const item of items) {
+    const verdict = validator.validate(item);
+    if (verdict.ok) {
+      execution.collectedEvidence.push(item);
+      accepted.push(
+        `  accepted ${item.path} lines ${item.startLine}-${item.endLine} (${item.reason})`,
+      );
+    } else {
+      rejected.push(
+        `  rejected ${item.path} lines ${item.startLine}-${item.endLine}: ${verdict.reason}`,
+      );
+    }
+  }
+  const lines = [
+    `Saved evidence: ${accepted.length} accepted, ${rejected.length} rejected.`,
+    ...accepted,
+    ...rejected,
+  ];
+  return fitReceiptLines(lines, cap);
+}
+
+/**
+ * Keep the first whole receipt lines that fit in `maxBytes` (billed at escaped
+ * size, since the loop later wraps the result in REPO_DATA markers), reserving
+ * a truncation note up front so the joined string can never exceed the cap.
+ */
+function fitReceiptLines(lines: string[], maxBytes: number): string {
+  const note = "\n(结果已截断：更多条目未显示)";
+  const contentBudget = Math.max(0, maxBytes - byteLength(note));
+  const parts: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const separator = parts.length === 0 ? 0 : 1;
+    if (used + separator + escapedByteLength(line) > contentBudget) {
+      break;
+    }
+    parts.push(line);
+    used += separator + escapedByteLength(line);
+  }
+  const truncated = parts.length < lines.length;
+  return `${parts.join("\n")}${truncated ? note : ""}`;
 }
 
 async function search(

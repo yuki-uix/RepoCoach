@@ -63,4 +63,16 @@ export interface EvalRun {
    * or when nothing was carried.
    */
   carriedBytes: number[];
+  /**
+   * Number of repo_save_evidence tool calls. The batch-save optimisation (#29)
+   * reduces this from one call per evidence item to ~1 call per turn, so this is
+   * the direct round-trip signal for that change. A count, not a ratio.
+   */
+  saveEvidenceCalls: number;
+  /**
+   * Bytes of the first-turn entry structure outline injected into context, one
+   * entry per turn that injected (normally just the first turn). Empty when the
+   * candidate had no entry files or none resolved to exported symbols.
+   */
+  entryOutlineBytes: number[];
 }

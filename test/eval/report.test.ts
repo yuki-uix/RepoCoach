@@ -304,6 +304,8 @@ describe("report rendering (terminal gate)", () => {
     expect(out).toMatch(/Tool calls\s+0 \(run invalid\)/);
     expect(out).toMatch(/Repeated reads\s+0 \(run invalid\)/);
     expect(out).toMatch(/Carried bytes\s+0 \(run invalid\)/);
+    expect(out).toMatch(/Save evidence calls 0 \(run invalid\)/);
+    expect(out).toMatch(/Entry outline bytes {2}0 \(run invalid\)/);
   });
 
   it("renders the A/B comparison table and calls out the high-variance token row", () => {

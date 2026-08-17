@@ -24,6 +24,7 @@
 
 import { byteLength } from "./limits.js";
 import { escapedByteLength, wrapUntrustedContext } from "./data-guard.js";
+import { injectedMessageKind } from "./message-kinds.js";
 
 export interface CachedRange {
   path: string;
@@ -122,11 +123,13 @@ const OMITTED_MAX_LISTED = 20;
 /**
  * The loop wraps the carried block in UNTRUSTED_DATA markers before it reaches
  * the provider (see loop.ts), so the fixed wrapper overhead is part of the
- * carried-context budget. `kind` must match the loop's
- * `wrapUntrustedContext(…, { kind: "already_read" })` call.
+ * carried-context budget. `kind` comes from the injected-message-kind registry
+ * (message-kinds.ts) so it stays in lock-step with the loop's wrapper call.
  */
+const CARRIED_KIND = injectedMessageKind("already_read");
+
 const CARRIED_WRAPPER_OVERHEAD_BYTES = byteLength(
-  wrapUntrustedContext("", { kind: "already_read" }),
+  wrapUntrustedContext("", { kind: CARRIED_KIND.kind }),
 );
 
 /**
@@ -274,12 +277,12 @@ export function buildCarriedBlock(
 ): BuiltCarriedBlock {
   const { carry, omitted } = selectCarryRanges(ranges, maxBytes);
   let wrapped = wrapUntrustedContext(formatCarriedBlock(carry, omitted), {
-    kind: "already_read",
+    kind: CARRIED_KIND.kind,
   });
   while (byteLength(wrapped) > maxBytes && carry.length > 0) {
     omitted.push(carry.pop()!);
     wrapped = wrapUntrustedContext(formatCarriedBlock(carry, omitted), {
-      kind: "already_read",
+      kind: CARRIED_KIND.kind,
     });
   }
   return { content: wrapped, carried: carry };

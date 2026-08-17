@@ -33,6 +33,8 @@ import {
 export interface FoundSymbol {
   name: string;
   kind: "function" | "class";
+  /** 1-based line of the `export` keyword in the defining file. */
+  line: number;
 }
 
 /** An exportable symbol together with the file that actually defines it. */
@@ -150,126 +152,7 @@ export class HeuristicCandidateGenerator implements CandidateGenerator {
    */
   async resolveSymbols(input: CandidateGeneratorInput): Promise<ResolvedSymbol[]> {
     const treePaths = new Set(input.tree.map((entry) => entry.path));
-    const seenSymbols = new Set<string>();
-    const resolved: ResolvedSymbol[] = [];
-    for (const entryFile of input.entryCandidates) {
-      const symbols = await this.collectExportedSymbols(
-        input.reader,
-        input.repo,
-        entryFile,
-        treePaths,
-      );
-      for (const located of symbols) {
-        const key = `${located.file}:${located.symbol.name}`;
-        if (seenSymbols.has(key)) {
-          continue;
-        }
-        seenSymbols.add(key);
-        resolved.push({
-          file: located.file,
-          symbol: located.symbol,
-          exportedFrom: entryFile,
-        });
-      }
-    }
-    return resolved;
-  }
-
-  /**
-   * Collect exportable functions/classes reachable from `entryFile`, following
-   * re-export barrels. Returns each symbol with the file that defines it.
-   */
-  private async collectExportedSymbols(
-    reader: Reader,
-    repo: Repository,
-    entryFile: string,
-    treePaths: Set<string>,
-  ): Promise<LocatedSymbol[]> {
-    const located: LocatedSymbol[] = [];
-    // Visited set is the cycle guard: a re-export loop (a → b → a) terminates
-    // because an already-scanned file is never re-enqueued.
-    const visited = new Set<string>([entryFile]);
-    const queue: Array<{ path: string; depth: number }> = [
-      { path: entryFile, depth: 0 },
-    ];
-
-    while (queue.length > 0) {
-      const { path, depth } = queue.shift()!;
-      let content: string;
-      try {
-        content = reader.readFile(repo, path).content;
-      } catch {
-        continue;
-      }
-
-      for (const symbol of this.parseExportedSymbols(content)) {
-        located.push({ file: path, symbol });
-      }
-
-      if (depth < MAX_REEXPORT_DEPTH) {
-        for (const next of this.resolveReExports(content, path, treePaths)) {
-          if (visited.has(next)) {
-            continue;
-          }
-          if (visited.size >= MAX_REEXPORT_FILES) {
-            continue;
-          }
-          visited.add(next);
-          queue.push({ path: next, depth: depth + 1 });
-        }
-      }
-    }
-
-    return located;
-  }
-
-  /** Top-level `export function` / `export class` declarations in one file. */
-  private parseExportedSymbols(content: string): FoundSymbol[] {
-    const symbols: FoundSymbol[] = [];
-    const seen = new Set<string>();
-    for (const match of content.matchAll(EXPORTED_SYMBOL_RE)) {
-      const name = match[1];
-      if (name === undefined || seen.has(name)) {
-        continue;
-      }
-      seen.add(name);
-      symbols.push({
-        name,
-        kind: match[0].includes("class") ? "class" : "function",
-      });
-    }
-    return symbols;
-  }
-
-  /**
-   * Resolve the target files of a file's `export … from "…"` statements. The
-   * specifiers are untrusted repository content, so they are never used to
-   * build a path directly: `resolveImportSpecifier` normalises with `joinPosix`
-   * (which rejects `..` escapes) and only returns a path that actually appears
-   * in the reader's tree.
-   */
-  private resolveReExports(
-    content: string,
-    file: string,
-    treePaths: Set<string>,
-  ): string[] {
-    const baseDir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
-    const specifiers = new Set<string>();
-    for (const match of content.matchAll(REEXPORT_FROM_RE)) {
-      const specifier = match[1];
-      if (specifier !== undefined) {
-        specifiers.add(specifier);
-      }
-    }
-
-    const resolved: string[] = [];
-    for (const specifier of specifiers) {
-      const path = resolveImportSpecifier(baseDir, specifier, treePaths);
-      if (path !== null && path !== file) {
-        resolved.push(path);
-      }
-    }
-    return resolved;
+    return resolveExportedSymbols(input.reader, input.repo, input.entryCandidates, treePaths);
   }
 
   private async countReferences(
@@ -401,6 +284,143 @@ export class HeuristicCandidateGenerator implements CandidateGenerator {
     }
     return resolved;
   }
+}
+
+/**
+ * Resolve the exportable symbols reachable from each entry candidate, following
+ * re-export barrels, and collapse duplicates by (file, name). Shared by
+ * `HeuristicCandidateGenerator.resolveSymbols` (candidate generation) and the
+ * agent loop's first-turn entry outline (issue #29), so the outline is built
+ * from the exact same barrel-penetrated definitions the candidates were
+ * grounded on — never a parallel, divergent parse.
+ */
+export async function resolveExportedSymbols(
+  reader: Reader,
+  repo: Repository,
+  entryCandidates: string[],
+  treePaths: Set<string>,
+): Promise<ResolvedSymbol[]> {
+  const seenSymbols = new Set<string>();
+  const resolved: ResolvedSymbol[] = [];
+  for (const entryFile of entryCandidates) {
+    const symbols = await collectExportedSymbols(reader, repo, entryFile, treePaths);
+    for (const located of symbols) {
+      const key = `${located.file}:${located.symbol.name}`;
+      if (seenSymbols.has(key)) {
+        continue;
+      }
+      seenSymbols.add(key);
+      resolved.push({
+        file: located.file,
+        symbol: located.symbol,
+        exportedFrom: entryFile,
+      });
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Collect exportable functions/classes reachable from `entryFile`, following
+ * re-export barrels. Returns each symbol with the file that defines it.
+ */
+async function collectExportedSymbols(
+  reader: Reader,
+  repo: Repository,
+  entryFile: string,
+  treePaths: Set<string>,
+): Promise<LocatedSymbol[]> {
+  const located: LocatedSymbol[] = [];
+  // Visited set is the cycle guard: a re-export loop (a → b → a) terminates
+  // because an already-scanned file is never re-enqueued.
+  const visited = new Set<string>([entryFile]);
+  const queue: Array<{ path: string; depth: number }> = [
+    { path: entryFile, depth: 0 },
+  ];
+
+  while (queue.length > 0) {
+    const { path, depth } = queue.shift()!;
+    let content: string;
+    try {
+      content = reader.readFile(repo, path).content;
+    } catch {
+      continue;
+    }
+
+    for (const symbol of parseExportedSymbols(content)) {
+      located.push({ file: path, symbol });
+    }
+
+    if (depth < MAX_REEXPORT_DEPTH) {
+      for (const next of resolveReExports(content, path, treePaths)) {
+        if (visited.has(next)) {
+          continue;
+        }
+        if (visited.size >= MAX_REEXPORT_FILES) {
+          continue;
+        }
+        visited.add(next);
+        queue.push({ path: next, depth: depth + 1 });
+      }
+    }
+  }
+
+  return located;
+}
+
+/** Top-level `export function` / `export class` declarations in one file. */
+function parseExportedSymbols(content: string): FoundSymbol[] {
+  const symbols: FoundSymbol[] = [];
+  const seen = new Set<string>();
+  for (const match of content.matchAll(EXPORTED_SYMBOL_RE)) {
+    const name = match[1];
+    if (name === undefined || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    symbols.push({
+      name,
+      kind: match[0].includes("class") ? "class" : "function",
+      line: lineNumberOf(content, match.index),
+    });
+  }
+  return symbols;
+}
+
+/** 1-based line number of a character offset within `content`. */
+function lineNumberOf(content: string, index: number): number {
+  return content.slice(0, index).split("\n").length;
+}
+
+/**
+ * Resolve the target files of a file's `export … from "…"` statements. The
+ * specifiers are untrusted repository content, so they are never used to
+ * build a path directly: `resolveImportSpecifier` normalises with `joinPosix`
+ * (which rejects `..` escapes) and only returns a path that actually appears
+ * in the reader's tree.
+ */
+function resolveReExports(
+  content: string,
+  file: string,
+  treePaths: Set<string>,
+): string[] {
+  const baseDir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
+  const specifiers = new Set<string>();
+  for (const match of content.matchAll(REEXPORT_FROM_RE)) {
+    const specifier = match[1];
+    if (specifier !== undefined) {
+      specifiers.add(specifier);
+    }
+  }
+
+  const resolved: string[] = [];
+  for (const specifier of specifiers) {
+    const path = resolveImportSpecifier(baseDir, specifier, treePaths);
+    if (path !== null && path !== file) {
+      resolved.push(path);
+    }
+  }
+  return resolved;
 }
 
 function resolveImportSpecifier(

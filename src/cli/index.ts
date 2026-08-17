@@ -160,7 +160,14 @@ async function runStart(input: string, deps: CliDeps): Promise<number> {
         ? {}
         : { workspacePath: scope.workspacePath }),
     });
-    const runner = buildRunner(asm, repo, session.id, featureGoal(candidate), prompt.question);
+    const runner = buildRunner(
+      asm,
+      repo,
+      session.id,
+      featureGoal(candidate),
+      candidate.entryFiles,
+      prompt.question,
+    );
     const outcome = await runner.run();
     return await finishSession(asm, repo, session.id, outcome, prompt.question);
   } finally {
@@ -195,8 +202,16 @@ async function runResume(sessionId: string, deps: CliDeps): Promise<number> {
         ? {}
         : { workspacePath: resumed.session.workspacePath };
     const candidates = await asm.candidateProvider.listCandidates(repo, scope);
-    const goal = resolveFeatureGoal(candidates, resumed.session.featureId);
-    const runner = buildRunner(asm, repo, resumed.sessionId, goal, prompt.question);
+    const candidate = candidates.find((item) => item.id === resumed.session.featureId);
+    const goal = candidate === undefined ? resumed.session.featureId : featureGoal(candidate);
+    const runner = buildRunner(
+      asm,
+      repo,
+      resumed.sessionId,
+      goal,
+      candidate?.entryFiles ?? [],
+      prompt.question,
+    );
     const outcome = await runner.run();
     return await finishSession(asm, repo, resumed.sessionId, outcome, prompt.question);
   } finally {
@@ -209,6 +224,7 @@ function buildRunner(
   repo: Repository,
   sessionId: string,
   goal: string,
+  entryFiles: string[],
   prompt: PromptFn,
 ): SessionRunner {
   const target: EventTarget = { sink: null };
@@ -217,6 +233,7 @@ function buildRunner(
     sessionId,
     goal,
     (event) => target.sink?.push(event),
+    { entryFiles },
   );
   return new SessionRunner({
     orchestrator,
@@ -405,11 +422,6 @@ async function selectWorkspace(
 
 function featureGoal(candidate: FeatureCandidate): string {
   return `${candidate.title} — ${candidate.description}`;
-}
-
-function resolveFeatureGoal(candidates: FeatureCandidate[], featureId: string): string {
-  const candidate = candidates.find((item) => item.id === featureId);
-  return candidate === undefined ? featureId : featureGoal(candidate);
 }
 
 function repositoryIdFromRepo(repo: Repository): string {
