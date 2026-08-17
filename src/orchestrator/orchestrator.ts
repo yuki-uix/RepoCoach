@@ -158,6 +158,15 @@ export class Orchestrator {
       );
     }
 
+    // The budget is a hard ceiling, so it is checked *before* the call, not
+    // only after. A fresh session starts at zero usage and never trips this,
+    // but a resumed one carries its persisted usage: without this check the
+    // first resumed step would spend another model call just to discover it
+    // was already over budget.
+    if (this.isBudgetExceeded()) {
+      return this.closeOverBudget(session);
+    }
+
     const invocation = await this.invokeWithRetry(phase, session, input);
     if (invocation === null) {
       // The agent never produced a schema-valid decision. If the session
@@ -220,6 +229,27 @@ export class Orchestrator {
    * when the session already has evidence or posed questions, otherwise abandon
    * the session. Either way the learner keeps whatever was persisted.
    */
+  /**
+   * Close a session that is already over budget before any model call. The
+   * session keeps whatever it has and moves straight to recap; `renderRecap`
+   * builds it from the stored evidence, so no further agent call is needed.
+   */
+  private closeOverBudget(session: LearningSession): StepResult {
+    this.store.updateSession(this.sessionId, {
+      phase: "recap",
+      status: "completed",
+      turnCount: session.turnCount,
+      usage: this.accumulatedUsage,
+    });
+    return {
+      phase: "recap",
+      decision: null,
+      decisionOverridden: true,
+      turn: null,
+      budgetExceeded: true,
+    };
+  }
+
   private degrade(): StepResult {
     const turns = this.store.listTurns(this.sessionId);
     const hasContent = turns.some(

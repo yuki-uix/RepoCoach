@@ -538,6 +538,42 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     await expect(orchestrator.step()).rejects.toThrow(/terminal phase/);
   });
 
+  // The budget is a hard ceiling: a resumed session whose persisted usage is
+  // already over it must not spend one more model call to find that out.
+  it("recaps without calling the agent when resumed usage is already over budget", async () => {
+    let calls = 0;
+    const agent: AgentInvoker = async () => {
+      calls += 1;
+      return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+    };
+    const session = store.createSession({
+      repositoryId: "repo-1",
+      featureId: "feature-1",
+    });
+    const orchestrator = new Orchestrator({
+      agent,
+      store,
+      sessionId: session.id,
+      featureGoal: "goal",
+      budget: { maxInputTokens: 1, maxOutputTokens: 1 },
+      initialUsage: { inputTokens: 2, outputTokens: 0 },
+    });
+
+    const result = await orchestrator.step();
+
+    expect(calls).toBe(0);
+    expect(result.phase).toBe("recap");
+    expect(result.budgetExceeded).toBe(true);
+    expect(result.decision).toBeNull();
+    expect(result.turn).toBeNull();
+    expect(store.getSession(session.id)?.phase).toBe("recap");
+    expect(store.getSession(session.id)?.status).toBe("completed");
+    expect(store.getSession(session.id)?.usage).toEqual({ inputTokens: 2, outputTokens: 0 });
+    // And it is terminal: a further step throws rather than resuming.
+    await expect(orchestrator.step()).rejects.toThrow(/terminal phase/);
+    expect(calls).toBe(0);
+  });
+
   it("seeds usage from initialUsage and persists the running total", async () => {
     const { agent } = stubAgent((input) => {
       if (input.phase === "orientation") {
