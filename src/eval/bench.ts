@@ -19,13 +19,14 @@ import { join } from "node:path";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { ChatProvider } from "../agent/provider.js";
+import type { Repository } from "../reader/index.js";
 import { DEFAULT_DEEPSEEK_MODEL, DeepSeekProvider } from "../agent/index.js";
 import { loadConfig } from "../config.js";
-import { assembleSession } from "../cli/assemble.js";
+import { assembleSession, type SessionAssembly } from "../cli/assemble.js";
 import { splitRepositoryId } from "../cli/index.js";
 import { neutralizeMarkdown, renderInline } from "../cli/markdown.js";
 import { spread, type Spread } from "./benchmark-stats.js";
-import { loadBenchmarks } from "./benchmarks.js";
+import { loadBenchmarks, type Benchmark } from "./benchmarks.js";
 import { runEvalSession } from "./runner.js";
 import type { EvalEndPhase, EvalRun } from "./types.js";
 
@@ -128,6 +129,7 @@ export async function runBench(options: BenchOptions = {}): Promise<BenchReport>
     for (const benchmark of benchmarks) {
       const { input, sha } = splitRepositoryId(benchmark.repositoryId);
       const repo = await asm.reader.importRepository(input, sha);
+      assertEntryFilesExist(asm, repo, benchmark);
 
       const runs: BenchRunEntry[] = [];
       for (let index = 0; index < runsPerBenchmark; index++) {
@@ -305,6 +307,37 @@ function alignRows(header: string[], rows: string[][]): string[] {
 /** Integers get thousands separators; a fractional median keeps one decimal. */
 function formatNumber(value: number): string {
   return Number.isInteger(value) ? value.toLocaleString("en-US") : value.toFixed(1);
+}
+
+/**
+ * Fail before spending a single model call when a benchmark's pinned entry
+ * files are not in the pinned commit. A benchmark whose entry files do not
+ * resolve still *runs* — the outline is simply empty and the model explores
+ * from scratch — which silently turns a pinned comparison back into the
+ * unpinned one it was built to replace. That happened: the first draft of
+ * `real-repos.json` pointed Zod at `src/types.ts`, a path that does not exist
+ * at any commit of the current layout, and nothing complained.
+ */
+function assertEntryFilesExist(
+  asm: SessionAssembly,
+  repo: Repository,
+  benchmark: Benchmark,
+): void {
+  const missing = benchmark.entryFiles.filter((path) => {
+    try {
+      asm.reader.readFile(repo, path);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `benchmark "${benchmark.name}": entry files not readable at the pinned commit: ` +
+        `${missing.join(", ")}. Fix fixtures/benchmarks/real-repos.json — a benchmark ` +
+        `whose entry files do not resolve measures an unpinned session.`,
+    );
+  }
 }
 
 function buildRealProvider(repoRoot: string): ChatProvider {

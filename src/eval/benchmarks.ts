@@ -52,12 +52,25 @@ export const benchmarksFileSchema = z
       // A remote benchmark without a pinned SHA is not repeatable: the reader
       // would clone whatever the default branch points at today. Local paths
       // (tests) are exempt — they pin nothing because nothing is fetched.
-      if (isRemoteUrl(benchmark.repositoryId) && pinnedSha(benchmark.repositoryId) === undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [index, "repositoryId"],
-          message: "remote repositoryId must pin a full 40-char commit SHA as `<url>#<sha>`",
-        });
+      if (isRemoteUrl(benchmark.repositoryId)) {
+        const sha = pinnedSha(benchmark.repositoryId);
+        if (sha === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, "repositoryId"],
+            message: "remote repositoryId must pin a full 40-char commit SHA as `<url>#<sha>`",
+          });
+        } else if (/^0{40}$/.test(sha)) {
+          // An all-zero SHA is well-formed but names no commit. It is the shape
+          // a placeholder takes while a benchmark is being drafted, and it once
+          // shipped that way — passing the 40-hex check while pinning nothing,
+          // which is the exact failure this file exists to prevent.
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, "repositoryId"],
+            message: "repositoryId pins the all-zero placeholder SHA; pin a real commit",
+          });
+        }
       }
     }
   });

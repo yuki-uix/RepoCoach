@@ -1,19 +1,22 @@
 [
   {
     "name": "zod",
-    "repositoryId": "https://github.com/colinhacks/zod#0000000000000000000000000000000000000000",
+    "repositoryId": "https://github.com/colinhacks/zod#9f0a3d81221e3ab7c09ca4911ef35b54817869a4",
     "featureId": "schema-parse",
-    "featureGoal": "Trace how a Zod schema validates a value through _parse and turns a failed check into a ZodError.",
-    "entryFiles": ["src/types.ts"],
+    "featureGoal": "Trace how a Zod v4 schema validates a value: from the `parse` / `safeParse` entry points in v4/core/parse.ts, through the schema's run and its check pipeline in v4/core/schemas.ts, to how a failed check becomes a $ZodError issue.",
+    "entryFiles": [
+      "packages/zod/src/v4/core/parse.ts",
+      "packages/zod/src/v4/core/schemas.ts"
+    ],
     "answers": [
-      "I think z.string() builds a ZodString object, and calling .parse() on it runs an internal _parse that checks the value's type and throws a ZodError listing every failed check.",
-      "The error messages come from an issue map in the schema — each check adds an issue with a code like invalid_type, and ZodError formats them with the path to the failing field.",
-      "I am not sure how custom refinements and transforms fit in — whether they run inside the same _parse pipeline or after it."
+      "I think z.string() builds a schema object and calling .parse() on it runs an internal parse function that checks the value's type and then throws an error listing every failed check.",
+      "The error messages come from an issue list on the payload — each failed check pushes an issue with a code like invalid_type, and the error class formats them together with the path to the failing field.",
+      "I am not sure how refinements and transforms fit in — whether they run inside the same check pipeline or in a separate pass after it."
     ]
   },
   {
     "name": "hono",
-    "repositoryId": "https://github.com/honojs/hono#0000000000000000000000000000000000000000",
+    "repositoryId": "https://github.com/honojs/hono#a19462879716e7b600daed8eb3a1b2af4bd68feb",
     "featureId": "request-dispatch",
     "featureGoal": "Trace how an incoming HTTP request is routed through Hono to its handler and how middleware wraps that handler.",
     "entryFiles": ["src/hono-base.ts", "src/compose.ts"],

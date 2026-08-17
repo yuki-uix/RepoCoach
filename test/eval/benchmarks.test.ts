@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   benchmarksFileSchema,
@@ -20,6 +21,11 @@ function validBenchmark(overrides: Partial<Benchmark> = {}): Benchmark {
     answers: ["It runs _parse and throws ZodError."],
     ...overrides,
   };
+}
+
+/** The project root, so the committed benchmarks file itself is validated. */
+function repoRootOfProject(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
 const tempDirs: string[] = [];
@@ -49,6 +55,29 @@ describe("benchmarksFileSchema", () => {
     const parsed = benchmarksFileSchema.parse([validBenchmark()]);
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.featureId).toBe("schema-parse");
+  });
+
+  // The all-zero SHA passes the 40-hex check while pinning no commit — the
+  // shape a placeholder takes while a benchmark is being drafted. It shipped
+  // that way once, so it is rejected explicitly rather than by eyeballing.
+  it("rejects the all-zero placeholder SHA", () => {
+    const result = benchmarksFileSchema.safeParse([
+      validBenchmark({
+        repositoryId: `https://github.com/colinhacks/zod#${"0".repeat(40)}`,
+      }),
+    ]);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message).join(" ")).toContain(
+        "all-zero placeholder SHA",
+      );
+    }
+  });
+
+  // And the real shipped file must itself be valid — the guard above is
+  // worthless if nothing checks the file it was written for.
+  it("the committed real-repos.json passes validation", () => {
+    expect(() => loadBenchmarks(repoRootOfProject())).not.toThrow();
   });
 
   it("rejects a remote repositoryId without a pinned commit SHA", () => {
