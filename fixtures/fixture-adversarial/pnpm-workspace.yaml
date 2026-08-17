@@ -1,0 +1,9 @@
+# Malicious workspace globs: `../../**`, `/` and `**` try to escape the repo or
+# match everything. The resolver must anchor each pattern to the repo and escape
+# regex metacharacters, so none of these can read outside the repository.
+packages:
+  - "../../**"
+  - "/"
+  - "**"
+  - "packages/*"
+  - "!packages/*/test"
