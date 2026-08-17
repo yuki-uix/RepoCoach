@@ -932,3 +932,217 @@ describe("AgentLoop entry outline", () => {
     expect(outline).toBe(false);
   });
 });
+
+describe("AgentLoop same-turn window compression", () => {
+  const PLACEHOLDER_MARK = "内容已省略";
+
+  /** An assistant message carrying several tool calls in one provider round. */
+  function multiToolMessage(
+    calls: Array<{ id: string; name: string; arguments: unknown }>,
+  ): ChatMessage {
+    return {
+      role: "assistant",
+      content: null,
+      toolCalls: calls.map(({ id, name, arguments: args }) => ({
+        id,
+        name,
+        arguments: JSON.stringify(args),
+      })),
+    };
+  }
+
+  /** The role:"tool" message contents of one provider request, in send order. */
+  function toolMessages(request: ChatCompletionRequest): string[] {
+    return request.messages.filter((m) => m.role === "tool").map((m) => m.content ?? "");
+  }
+
+  function makeLoopWithFiles(
+    files: Record<string, string>,
+    provider: ChatProvider,
+    opts: Partial<AgentLoopOptions> = {},
+  ): AgentLoop {
+    const { reader, repo } = makeTempReader(files);
+    return new AgentLoop({ provider, reader, repo, ...opts });
+  }
+
+  /**
+   * Like `scriptedProvider`, but snapshots the outgoing messages per call. The
+   * loop reuses (and mutates) one `messages` array, so the top-level
+   * `scriptedProvider` captures every request pointing at the same final array;
+   * these tests assert the state at a specific round, so they need the copy.
+   */
+  function snapshotProvider(
+    respond: (index: number) => ChatMessage,
+  ): { provider: ChatProvider; requests: ChatCompletionRequest[] } {
+    const requests: ChatCompletionRequest[] = [];
+    const provider: ChatProvider = {
+      async complete(request) {
+        requests.push({ ...request, messages: request.messages.map((m) => ({ ...m })) });
+        return {
+          message: respond(requests.length - 1),
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+    return { provider, requests };
+  }
+
+  it("compresses the first round's result by the 5th call and keeps the last 4 rounds intact", async () => {
+    const files = {
+      "src/a.ts": "export const A = 'A-unique';\n",
+      "src/b.ts": "export const B = 'B-unique';\n",
+      "src/c.ts": "export const C = 'C-unique';\n",
+      "src/d.ts": "export const D = 'D-unique';\n",
+    };
+    const { provider, requests } = snapshotProvider((index) =>
+      index < 4
+        ? toolMessage(`c${index}`, "repo_read_file", JSON.stringify({ path: `src/${"abcd"[index]}.ts` }))
+        : toolMessage("submit", "submit_decision", DECISION),
+    );
+    const loop = makeLoopWithFiles(files, provider);
+
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    // Round 3 (the 4th call) still carries the round-0 read in full.
+    expect(toolMessages(requests[3])[0]).toContain("A-unique");
+
+    // Round 4 (the 5th call): round 0 (1-indexed round 1) is compressed, the
+    // last 4 rounds stay intact.
+    const after = toolMessages(requests[4]);
+    expect(after).toHaveLength(4);
+    expect(after[0]).toContain(PLACEHOLDER_MARK);
+    expect(after[0]).toContain("src/a.ts");
+    expect(after[0]).not.toContain("A-unique");
+    expect(after[1]).toContain("B-unique");
+    expect(after[2]).toContain("C-unique");
+    expect(after[3]).toContain("D-unique");
+  });
+
+  it("keeps or compresses a multi-tool-call round's results together", async () => {
+    const files = {
+      "src/x.ts": "export const X = 'X-unique';\n",
+      "src/y.ts": "export const Y = 'Y-unique';\n",
+    };
+    const { provider, requests } = snapshotProvider((index) => {
+      if (index === 0) {
+        return multiToolMessage([
+          { id: "c0a", name: "repo_read_file", arguments: { path: "src/x.ts" } },
+          { id: "c0b", name: "repo_read_file", arguments: { path: "src/y.ts" } },
+        ]);
+      }
+      if (index < 4) return toolMessage(`c${index}`, "repo_get_tree", "{}");
+      return toolMessage("submit", "submit_decision", DECISION);
+    });
+    const loop = makeLoopWithFiles(files, provider);
+
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    // Round 3: both round-0 reads are still in full.
+    const before = toolMessages(requests[3]);
+    expect(before.some((c) => c.includes("X-unique"))).toBe(true);
+    expect(before.some((c) => c.includes("Y-unique"))).toBe(true);
+
+    // Round 4: both round-0 reads are compressed together (whole round).
+    const after = toolMessages(requests[4]);
+    const x = after.find((c) => c.includes("src/x.ts"));
+    const y = after.find((c) => c.includes("src/y.ts"));
+    expect(x).toContain(PLACEHOLDER_MARK);
+    expect(x).not.toContain("X-unique");
+    expect(y).toContain(PLACEHOLDER_MARK);
+    expect(y).not.toContain("Y-unique");
+  });
+
+  it("never compresses rejectDecision correction messages", async () => {
+    const files = { "src/a.ts": "export const A = 'A-unique';\n" };
+    const { provider, requests } = snapshotProvider((index) => {
+      if (index === 0) {
+        // One round pushes both a repo read (compressible) and a schema-rejected
+        // submit_decision (whose corrective message must never be compressed).
+        return multiToolMessage([
+          { id: "c0a", name: "repo_read_file", arguments: { path: "src/a.ts" } },
+          {
+            id: "c0b",
+            name: "submit_decision",
+            arguments: { evidence: [], nextAction: "not-a-real-action" },
+          },
+        ]);
+      }
+      if (index < 4) return toolMessage(`c${index}`, "repo_get_tree", "{}");
+      return toolMessage("submit", "submit_decision", DECISION);
+    });
+    const loop = makeLoopWithFiles(files, provider);
+
+    const result = await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+    expect(result.decision.nextAction).toBe("finish");
+
+    // By round 4 the round-0 read is compressed, but the corrective message from
+    // the same round survives verbatim (it is an instruction, not repo data).
+    const after = toolMessages(requests[4]);
+    const read = after.find((c) => c.includes("src/a.ts"));
+    const correction = after.find((c) => c.includes("Decision rejected by schema"));
+    expect(read).toContain(PLACEHOLDER_MARK);
+    expect(read).not.toContain("A-unique");
+    expect(correction).toBeDefined();
+    expect(correction).not.toContain(PLACEHOLDER_MARK);
+  });
+
+  it("rejects a citation of a range pushed out of the window", async () => {
+    const files = { "src/index.ts": "line1\nline2\nline3\nline4\n" };
+    const { reader, repo } = makeTempReader(files);
+    const ledger = new ToolReturnLedger();
+    const store = new InMemoryEvidenceStore();
+    const validator = new GroundingEvidenceValidator({ ledger, store, sessionId: "s1" });
+    const cited = { path: "src/index.ts", startLine: 1, endLine: 3, reason: "read then evicted" };
+
+    // Round 0 reads the range, rounds 1-4 fill the window so round 0 falls out,
+    // then submit_decision keeps citing the evicted range until the loop throws.
+    const { provider } = scriptedProvider((index) => {
+      if (index === 0) {
+        return toolMessage(
+          "c0",
+          "repo_read_file",
+          JSON.stringify({ path: "src/index.ts", startLine: 1, endLine: 3 }),
+        );
+      }
+      if (index < 5) return toolMessage(`c${index}`, "repo_get_tree", "{}");
+      return toolMessage(
+        `c${index}`,
+        "submit_decision",
+        JSON.stringify({ evidence: [cited], nextAction: "show_evidence" }),
+      );
+    });
+    const loop = new AgentLoop({ provider, reader, repo, evidenceValidator: validator, ledger });
+
+    await expect(
+      loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] }),
+    ).rejects.toThrow(AgentDecisionInvalidError);
+
+    expect(store.listBySession("s1")).toEqual([]);
+  });
+
+  it("drops toolResultBytes once compression kicks in (existing instrumentation)", async () => {
+    // A read result clearly larger than its placeholder, plus tiny tree results
+    // for the filler rounds, so the round-0 read dominating the byte count makes
+    // the compression drop visible in the provider_request events.
+    const big = Array.from({ length: 150 }, (_, i) => `export const v${i} = ${i};`).join("\n");
+    const files = { "src/big.ts": big };
+    const { provider } = scriptedProvider((index) => {
+      if (index === 0) {
+        return toolMessage("c0", "repo_read_file", JSON.stringify({ path: "src/big.ts" }));
+      }
+      if (index < 5) return toolMessage(`c${index}`, "repo_get_tree", "{}");
+      return toolMessage("submit", "submit_decision", DECISION);
+    });
+    const events: AgentLoopEvent[] = [];
+    const loop = makeLoopWithFiles(files, provider, { onEvent: (event) => events.push(event) });
+
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    const requests = events.filter((event) => event.type === "provider_request");
+    expect(requests[0]?.toolResultBytes).toBe(0);
+    expect(requests[1]?.toolResultBytes).toBeGreaterThan(0);
+    // Round 4 (event index 4) compresses the round-0 read, so the tool-result
+    // bytes fall below the previous round even though a new (tiny) result joined.
+    expect(requests[4]?.toolResultBytes).toBeLessThan(requests[3]!.toolResultBytes);
+  });
+});

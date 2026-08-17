@@ -15,6 +15,12 @@ interface RecordedRange {
   path: string;
   startLine: number;
   endLine: number;
+  /**
+   * The within-turn provider-call round the range was recorded in (0-based).
+   * Only tool returns are tagged; carried ranges keep `round: -1` and are never
+   * revoked by the same-turn compression window.
+   */
+  round: number;
 }
 
 /**
@@ -27,6 +33,18 @@ export class ToolReturnLedger {
   private ranges: RecordedRange[] = [];
   /** Ranges carried into this turn's context (from the session read cache). */
   private carried: RecordedRange[] = [];
+  /** The current within-turn round `record` tags new ranges with. */
+  private currentRound = 0;
+
+  /**
+   * Advance the within-turn round (0-based provider-call index). The loop calls
+   * this before executing each round's tool calls so `record` tags ranges with
+   * the round that produced them, letting `revokeRound` later drop exactly the
+   * ranges pushed out of the live window by compression (issue #36).
+   */
+  setRound(round: number): void {
+    this.currentRound = round;
+  }
 
   /** Record a (path, inclusive line range) the tools actually returned. */
   record(path: string, startLine: number, endLine: number): void {
@@ -34,7 +52,21 @@ export class ToolReturnLedger {
       path: normalizePath(path),
       startLine,
       endLine,
+      round: this.currentRound,
     });
+  }
+
+  /**
+   * Remove every range recorded in `round`, leaving ranges recorded in other
+   * rounds (and every carried range) untouched. This is the grounding half of
+   * the compression window: when a round's tool results are replaced by
+   * placeholder lines, their ranges stop being citable in the same breath — the
+   * model no longer sees the content, so a citation would be hallucinated. The
+   * revocation is per-round and per-range, never "everything on this path", so a
+   * sub-range re-read in a still-live round stays citable.
+   */
+  revokeRound(round: number): void {
+    this.ranges = this.ranges.filter((range) => range.round !== round);
   }
 
   /**
@@ -48,6 +80,7 @@ export class ToolReturnLedger {
       path: normalizePath(path),
       startLine,
       endLine,
+      round: -1,
     });
   }
 
@@ -100,6 +133,7 @@ export class ToolReturnLedger {
   resetTurn(): void {
     this.ranges = [];
     this.carried = [];
+    this.currentRound = 0;
   }
 }
 
