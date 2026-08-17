@@ -30,6 +30,13 @@ export interface RunOutcome {
   phase: RunOutcomePhase;
   /** True when the recap was salvaged after the agent failed to decide. */
   degraded?: boolean;
+  /**
+   * True when the session closed because it was already over its token budget,
+   * before any model call. Kept separate from `degraded`: both produce a
+   * decision-less recap, but only one of them is a model failure, and telling
+   * the learner the model failed when it did not is a false report.
+   */
+  overBudget?: boolean;
 }
 
 /** How much text to accumulate before emitting one "thinking" progress dot. */
@@ -144,7 +151,11 @@ export class SessionRunner {
         }
 
         if (result.phase === "recap") {
-          return { phase: "recap", degraded: result.decision === null };
+          return {
+            phase: "recap",
+            degraded: result.decision === null && !result.budgetExceeded,
+            overBudget: result.decision === null && result.budgetExceeded,
+          };
         }
         if (result.phase === "error") {
           return { phase: "error" };

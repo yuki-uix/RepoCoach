@@ -339,6 +339,11 @@ async function finishSession(
     asm.stderr.write(
       `⚠ 模型未能产出有效决策，已用已保存证据合成一份最小复盘。\n`,
     );
+  } else if (outcome.overBudget) {
+    asm.stderr.write(
+      `⚠ 该 Session 恢复时已超出 Token 预算，未再调用模型，直接用已保存证据合成复盘。\n` +
+        `  下次可用 repocoach start ... --max-input-tokens <n> 提高上限。\n`,
+    );
   }
   asm.stdout.write(`${recap}\n`);
 

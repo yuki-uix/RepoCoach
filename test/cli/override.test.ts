@@ -114,6 +114,56 @@ describe("start/resume turn and budget overrides (default assembly)", () => {
     expect(result.phase).toBe("recap");
   });
 
+  // An over-budget close produces a decision-less recap, exactly like the
+  // agent-failure degradation — but reporting it as a model failure would be a
+  // false statement to the learner, so the two must stay distinguishable.
+  it("reports an over-budget resume as over budget, not as a model failure", async () => {
+    // A session left `active` with usage past its budget — what a crash or
+    // Ctrl-C mid-step leaves behind. Built through the store rather than a
+    // `start` run, because a start that reaches the budget closes itself as
+    // `completed` and is then no longer resumable.
+    const dataDir = makeDataDir();
+    const store = new JsonSessionStore(dataDir);
+    const session = store.createSession({
+      repositoryId: fixtureRoot,
+      featureId: "task-creation",
+      budget: { maxInputTokens: 1, maxOutputTokens: 1 },
+    });
+    store.appendTurn({
+      sessionId: session.id,
+      question: "已问过的问题",
+      evidence: [],
+    });
+    store.updateSession(session.id, {
+      phase: "questioning",
+      turnCount: 1,
+      usage: { inputTokens: 2, outputTokens: 0 },
+    });
+
+    // Resume: already over budget, so no model call may happen at all.
+    let calls = 0;
+    const streams2 = capturedStreams();
+    streams2.stdin.write("n\n");
+    await runCli(["resume", session.id], {
+      dataDir,
+      provider: {
+        complete: () => {
+          calls += 1;
+          return Promise.reject(new Error("must not be called"));
+        },
+      },
+      stdin: streams2.stdin,
+      stdout: streams2.stdout,
+      stderr: streams2.stderr,
+    });
+    streams2.stdin.end();
+
+    expect(calls).toBe(0);
+    const err = streams2.stderrText();
+    expect(err).toContain("超出 Token 预算");
+    expect(err).not.toContain("模型未能产出有效决策");
+  });
+
   it("buildOrchestrator applies a persisted maxTurns override", async () => {
     const dataDir = makeDataDir();
     const asm = assembleSession({ dataDir, provider: scriptedProvider(TURN_LIMIT_SCRIPT) });
