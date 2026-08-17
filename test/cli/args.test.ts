@@ -63,4 +63,24 @@ describe("runCli override validation", () => {
     expect(err).toContain(`--${flag}`);
     expect(err).toContain("Usage:");
   });
+
+  // Only `start` creates a session, which is where the overrides are persisted.
+  // Accepting them elsewhere would silently do nothing.
+  it.each([
+    ["resume", "s1"],
+    ["list", undefined],
+    ["show", "s1"],
+  ])("rejects an override flag on %s", async (command, arg) => {
+    const streams = capturedStreams();
+    const argv = [command, ...(arg === undefined ? [] : [arg]), "--max-turns", "3"];
+    const code = await runCli(argv, {
+      dataDir: makeDataDir(),
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+
+    expect(code).toBe(1);
+    expect(streams.stderrText()).toContain("--max-turns is only valid for start");
+  });
 });

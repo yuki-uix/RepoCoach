@@ -10,7 +10,6 @@ import type {
 } from "../../src/domain";
 import {
   DEFAULT_BUDGET,
-  DEFAULT_MAX_TURNS,
   Orchestrator,
   type AgentInvocation,
   type AgentInvoker,
@@ -260,7 +259,10 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     expect(store.getSession(sessionId)?.turnCount).toBe(5);
   });
 
-  it("caps at three questions when maxTurns is 3", async () => {
+  // Deliberately passes no `maxTurns`, so the default path is what is exercised
+  // — asserting `DEFAULT_MAX_TURNS === 3` alone would not catch an Orchestrator
+  // that stopped reading the constant.
+  it("caps at three questions with no maxTurns override", async () => {
     const { agent } = stubAgent((input) => {
       switch (input.phase) {
         case "orientation":
@@ -283,7 +285,7 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
           throw new Error(`unexpected phase ${input.phase}`);
       }
     });
-    const { orchestrator, sessionId } = makeOrchestrator(agent, { maxTurns: 3 });
+    const { orchestrator, sessionId } = makeOrchestrator(agent);
 
     await orchestrator.step(); // orientation → hypothesis
     await orchestrator.step(); // prediction (turn 1)
@@ -298,10 +300,6 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     expect(last.phase).toBe("recap");
     expect(last.decisionOverridden).toBe(true);
     expect(store.getSession(sessionId)?.turnCount).toBe(3);
-  });
-
-  it("defaults maxTurns to 3", () => {
-    expect(DEFAULT_MAX_TURNS).toBe(3);
   });
 
   it("counts the feedback probe-deeper question toward the turn limit", async () => {

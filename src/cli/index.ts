@@ -112,9 +112,12 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
   const { command, arg, dataDir } = parsed;
 
   // Validate the turn/budget overrides up front: an invalid value is a usage
-  // error (exit 1), never a silent fallback to the default.
+  // error (exit 1), never a silent fallback to the default. The overrides are
+  // persisted at session creation, so only `start` can honour them — passing
+  // them to any other command is rejected rather than silently ignored.
   let overrides: TurnBudgetOverrides;
   try {
+    rejectMisplacedOverrides(command, parsed);
     overrides = parseOverrides(parsed);
   } catch (error) {
     if (error instanceof UsageError) {
@@ -547,6 +550,29 @@ function parsePositiveInt(raw: string | undefined, flag: string): number | undef
     throw new UsageError(`--${flag} requires a positive integer, got "${raw}"`);
   }
   return Number(raw);
+}
+
+/** The override flags, paired with the CLI spelling used in error messages. */
+const OVERRIDE_FLAGS = [
+  ["maxTurns", "max-turns"],
+  ["maxInputTokens", "max-input-tokens"],
+  ["maxOutputTokens", "max-output-tokens"],
+] as const;
+
+/**
+ * Reject an override flag on a command that cannot act on it. `resume` reads the
+ * limits the session was started with, and `list` / `show` never build an
+ * Orchestrator, so accepting the flag there would silently do nothing.
+ */
+function rejectMisplacedOverrides(command: string, parsed: ParsedArgs): void {
+  if (command === "start") {
+    return;
+  }
+  for (const [key, flag] of OVERRIDE_FLAGS) {
+    if (parsed[key] !== undefined) {
+      throw new UsageError(`--${flag} is only valid for start`);
+    }
+  }
 }
 
 /**
