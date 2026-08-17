@@ -82,6 +82,9 @@ export {
 } from "./data-guard.js";
 export type { RepoDataMeta, UntrustedContextMeta } from "./data-guard.js";
 
+export { INJECTED_MESSAGE_KINDS, injectedMessageKind } from "./message-kinds.js";
+export type { InjectedMessageKind, InjectedWrapper } from "./message-kinds.js";
+
 export { acceptAllEvidence, createToolRegistry, REPO_TOOL_DEFINITIONS } from "./tools.js";
 export type {
   EvidenceValidator,

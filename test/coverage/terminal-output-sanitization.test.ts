@@ -12,6 +12,15 @@
  * this table or its output is unguarded by this test — there is no "safe-looking
  * field" whitelist (see markdown.ts).
  *
+ * Unlike the tool-exit / candidate-display / message-injection suites, this
+ * enumeration cannot be derived from a single implementation export: the render
+ * exits are heterogeneous functions (`renderRecap`, `renderQuestion`,
+ * `renderDecision`, `formatEvidence`, `renderSessionShow`, `runCli`, and the
+ * session-runner's streamed `tool_result`) spread across recap.ts,
+ * session-runner.ts, show.ts and index.ts with no registry tying them together.
+ * The list is therefore hand-maintained, and the "must be added to this table"
+ * rule above is its sync guarantee.
+ *
  * The three asserted invariants are exactly what stripTerminalControls /
  * neutralizeMarkdown / renderInline guarantee, and nothing our own dim/bold
  * styling emits can satisfy falsely:

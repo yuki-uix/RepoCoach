@@ -6,6 +6,11 @@
  * input, then repeatedly calls the provider, executes tool calls (wrapping
  * every repo result in REPO_DATA markers), and stops when the model submits a
  * schema-valid decision via submit_decision. See docs/architecture.md §3, §5.
+ *
+ * Every injected content kind's cap and data-guard `kind` string is read from
+ * the INJECTED_MESSAGE_KINDS registry in message-kinds.ts (never hardcoded
+ * here), so the enumerated coverage test can iterate the same single source of
+ * truth the loop assembles from.
  */
 
 import {
@@ -31,12 +36,8 @@ import {
 import { DEFAULT_DEEPSEEK_MODEL } from "./deepseek-provider.js";
 import { formatZodError } from "./errors.js";
 import { parseJsonLenient, unwrapToolArguments } from "./json-repair.js";
-import {
-  MAX_CARRIED_CONTEXT_BYTES,
-  MAX_HISTORY_SUMMARY_BYTES,
-  MAX_TOOL_RESULT_BYTES,
-  byteLength,
-} from "./limits.js";
+import { byteLength } from "./limits.js";
+import { injectedMessageKind } from "./message-kinds.js";
 import type { AgentLogger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type {
@@ -54,6 +55,17 @@ import {
 } from "./tools.js";
 import { SessionReadCache, buildCarriedBlock } from "./read-cache.js";
 import { buildEntryOutline, type EntryOutline } from "./entry-outline.js";
+
+/**
+ * The injected-message kinds this loop assembles, looked up once from the single
+ * registry in message-kinds.ts. The loop never hardcodes a cap or a data-guard
+ * `kind` string: `injectedMessageKind` throws on an unknown id, so a new
+ * injection site must first register its kind there — which is exactly the table
+ * the enumerated coverage test iterates (issue #31).
+ */
+const REPO_TOOL_RESULT_KIND = injectedMessageKind("repo_tool_result");
+const TURN_HISTORY_KIND = injectedMessageKind("turn_history");
+const CARRIED_BLOCK_KIND = injectedMessageKind("already_read");
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 15;
 export const MAX_DECISION_RETRIES = 2;
@@ -333,7 +345,7 @@ export class AgentLoop {
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
-            content: capRepoData(stray, { tool: toolCall.name }, MAX_TOOL_RESULT_BYTES),
+            content: capRepoData(stray, { tool: toolCall.name }, REPO_TOOL_RESULT_KIND.cap),
           });
           continue;
         }
@@ -355,6 +367,8 @@ export class AgentLoop {
         //     error results) → MAX_TOOL_RESULT_BYTES via capRepoData;
         //   - cross-turn carried block → MAX_CARRIED_CONTEXT_BYTES via
         //     buildCarriedBlock (already wraps + hard-caps before this point).
+        // Each cap is read from the INJECTED_MESSAGE_KINDS registry, not
+        // hardcoded here (see message-kinds.ts).
         const result =
           args === undefined
             ? "Error: tool arguments are not valid JSON"
@@ -362,14 +376,14 @@ export class AgentLoop {
                 name: toolCall.name,
                 args,
                 collectedEvidence,
-                maxBytes: MAX_TOOL_RESULT_BYTES - repoDataWrapperOverhead(meta),
+                maxBytes: REPO_TOOL_RESULT_KIND.cap - repoDataWrapperOverhead(meta),
               });
         this.emit({ type: "tool_result", name: toolCall.name, result });
         this.logger.debug("agent tool result", { tool: toolCall.name });
         messages.push({
           role: "tool",
           toolCallId: toolCall.id,
-          content: capRepoData(result, meta, MAX_TOOL_RESULT_BYTES),
+          content: capRepoData(result, meta, REPO_TOOL_RESULT_KIND.cap),
         });
       }
     }
@@ -391,7 +405,7 @@ export class AgentLoop {
       // copied-through instructions re-enter context as unmarked directives.
       messages.push({
         role: "user",
-        content: wrapUntrustedContext(history, { kind: "turn_history" }),
+        content: wrapUntrustedContext(history, { kind: TURN_HISTORY_KIND.kind }),
       });
     }
     // First turn only: preload a structural outline of the candidate's entry
@@ -448,7 +462,7 @@ export class AgentLoop {
     if (!this.carryReadContext || turnIndex === 0 || this.readCache.ranges.length === 0) {
       return null;
     }
-    const built = buildCarriedBlock(this.readCache.ranges, MAX_CARRIED_CONTEXT_BYTES);
+    const built = buildCarriedBlock(this.readCache.ranges, CARRIED_BLOCK_KIND.cap);
     // Only the ranges whose content actually landed in context are citable —
     // `buildCarriedBlock` returns exactly those after its hard cap, so any entry
     // it dropped is never recorded as carried (the model never saw its content).
@@ -560,11 +574,11 @@ function buildTurnInstruction(input: AgentInvokerInput): string {
  * entry outline already follow.
  */
 const HISTORY_WRAPPER_OVERHEAD = byteLength(
-  wrapUntrustedContext("", { kind: "turn_history" }),
+  wrapUntrustedContext("", { kind: TURN_HISTORY_KIND.kind }),
 );
 
 /** Raw-bytes budget for the un-wrapped summary, wrapper overhead already off. */
-const HISTORY_CONTENT_BUDGET = MAX_HISTORY_SUMMARY_BYTES - HISTORY_WRAPPER_OVERHEAD;
+const HISTORY_CONTENT_BUDGET = TURN_HISTORY_KIND.cap - HISTORY_WRAPPER_OVERHEAD;
 
 export function summarizeTurnHistory(turns: LearningTurn[]): string | null {
   if (turns.length === 0) {

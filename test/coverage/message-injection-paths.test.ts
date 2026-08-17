@@ -5,24 +5,23 @@
  * The defect this guards against is "one message exit is wrapped/capped but a
  * sibling exit is not" (issue #31: the byte cap missed the wrapper overhead on
  * one kind, and a new injection path was added without a cap). The enumeration
- * below is the four content kinds `loop.ts` assembles — repo tool results,
- * cross-turn carried block, first-turn entry outline, and the turn-history
- * summary — each mapped to the marker and cap constant its push site uses. A
- * fifth content kind added to the loop must be added to this table or it is
- * unguarded by this test.
+ * here is NOT a hand-written array of the four kinds — it is
+ * `INJECTED_MESSAGE_KINDS`, the single registry the loop and its builders read
+ * their cap and data-guard `kind` string from (message-kinds.ts). A fifth
+ * content kind added to the loop must be registered there first (the accessor
+ * throws on an unknown id), which makes the guards below fail until a producer
+ * is added — the list can never silently drift to "still testing four".
  *
  * The invariant per kind is: the message the provider actually receives carries
  * its wrapper marker AND is ≤ its terminal cap on the *wrapped* bytes (the same
  * "reserve the wrapper before fitting content" discipline every kind follows).
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   AgentLoop,
-  MAX_CARRIED_CONTEXT_BYTES,
-  MAX_ENTRY_OUTLINE_BYTES,
-  MAX_HISTORY_SUMMARY_BYTES,
-  MAX_TOOL_RESULT_BYTES,
+  INJECTED_MESSAGE_KINDS,
   REPO_DATA_END,
   REPO_DATA_START,
   SessionReadCache,
@@ -41,6 +40,9 @@ import {
   ToolReturnLedger,
 } from "../../src/evidence";
 import { makeTempReader } from "../agent/helpers";
+
+/** The modules that assemble data-guard-wrapped messages for the loop. */
+const ASSEMBLY_FILES = ["loop.ts", "entry-outline.ts", "read-cache.ts"] as const;
 
 /** An assistant message carrying a single tool call (mirrors loop.test.ts). */
 function toolMessage(id: string, name: string, argumentsJson: string): ChatMessage {
@@ -72,18 +74,6 @@ async function runLoop(
   const loop = new AgentLoop({ provider, ...opts });
   await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory });
   return requests;
-}
-
-interface MessageKind {
-  name: string;
-  /** The wrap start marker this kind's message must carry. */
-  startMarker: string;
-  /** The wrap end marker this kind's message must carry. */
-  endMarker: string;
-  /** Terminal byte cap on the wrapped message. */
-  cap: number;
-  /** Produce the message(s) of this kind from a loop run. */
-  produce: () => Promise<ChatMessage[]>;
 }
 
 /** A repo tool result closed through capRepoData (role "tool" message). */
@@ -154,54 +144,71 @@ async function historyMessages(): Promise<ChatMessage[]> {
   );
 }
 
-const MESSAGE_KINDS: MessageKind[] = [
-  {
-    name: "repo tool result",
-    startMarker: REPO_DATA_START,
-    endMarker: REPO_DATA_END,
-    cap: MAX_TOOL_RESULT_BYTES,
-    produce: toolResultMessages,
-  },
-  {
-    name: "cross-turn carried block",
-    startMarker: UNTRUSTED_DATA_START,
-    endMarker: UNTRUSTED_DATA_END,
-    cap: MAX_CARRIED_CONTEXT_BYTES,
-    produce: carriedMessages,
-  },
-  {
-    name: "first-turn entry outline",
-    startMarker: UNTRUSTED_DATA_START,
-    endMarker: UNTRUSTED_DATA_END,
-    cap: MAX_ENTRY_OUTLINE_BYTES,
-    produce: outlineMessages,
-  },
-  {
-    name: "turn-history summary",
-    startMarker: UNTRUSTED_DATA_START,
-    endMarker: UNTRUSTED_DATA_END,
-    cap: MAX_HISTORY_SUMMARY_BYTES,
-    produce: historyMessages,
-  },
-];
+/** A producer for each registered kind, keyed by the registry's stable id. */
+const PRODUCERS: Record<string, () => Promise<ChatMessage[]>> = {
+  repo_tool_result: toolResultMessages,
+  already_read: carriedMessages,
+  entry_outline: outlineMessages,
+  turn_history: historyMessages,
+};
 
-describe("loop message injection paths (enumerated message kinds)", () => {
-  it.each(MESSAGE_KINDS.map((kind) => kind.name))(
-    "%s is data-guard-wrapped and bounded by its terminal cap",
-    async (name) => {
-      const kind = MESSAGE_KINDS.find((k) => k.name === name);
-      expect(kind).toBeDefined();
-      const messages = await kind!.produce();
+describe("loop message injection paths (enumerated from INJECTED_MESSAGE_KINDS)", () => {
+  it("injects exactly the registered kinds — a missed registration fails here", () => {
+    // The assembly modules may only inject a message kind through the registry
+    // accessor `injectedMessageKind("<id>")`, which throws on an unknown id, so
+    // a new injection site must first register its kind. Scan those modules and
+    // require the ids they reference to equal the registry exactly: an id
+    // referenced but not registered, or registered but never referenced, both
+    // fail this assertion.
+    const referenced = new Set<string>();
+    for (const file of ASSEMBLY_FILES) {
+      const source = readFileSync(new URL(`../../src/agent/${file}`, import.meta.url), "utf8");
+      for (const match of source.matchAll(/injectedMessageKind\(\s*"([^"]+)"/g)) {
+        referenced.add(match[1]);
+      }
+    }
+    expect([...referenced].sort()).toEqual(INJECTED_MESSAGE_KINDS.map((k) => k.kind).sort());
+  });
+
+  it("has a producer for exactly the registered kinds", () => {
+    // Same set-equality guard as the tool-exit suite: a kind added to the
+    // registry without a producer (or a producer left behind after a kind is
+    // removed) fails here instead of being silently skipped by the enumeration.
+    expect(Object.keys(PRODUCERS).sort()).toEqual(
+      INJECTED_MESSAGE_KINDS.map((k) => k.kind).sort(),
+    );
+  });
+
+  it("records a wrapper consistent with each kind's markers", () => {
+    // The registry's `wrapper` field must agree with the marker pair it names;
+    // a mislabeled kind would otherwise assert the wrong boundary in the wrap
+    // test below.
+    for (const kind of INJECTED_MESSAGE_KINDS) {
+      if (kind.wrapper === "repo_data") {
+        expect(kind.startMarker).toBe(REPO_DATA_START);
+        expect(kind.endMarker).toBe(REPO_DATA_END);
+      } else {
+        expect(kind.startMarker).toBe(UNTRUSTED_DATA_START);
+        expect(kind.endMarker).toBe(UNTRUSTED_DATA_END);
+      }
+    }
+  });
+
+  for (const kind of INJECTED_MESSAGE_KINDS) {
+    it(`${kind.name} is data-guard-wrapped and bounded by its terminal cap`, async () => {
+      const produce = PRODUCERS[kind.kind];
+      expect(produce).toBeDefined();
+      const messages = await produce();
 
       expect(messages.length).toBeGreaterThan(0);
       for (const message of messages) {
         const content = typeof message.content === "string" ? message.content : "";
-        expect(content).toContain(kind!.startMarker);
-        expect(content).toContain(kind!.endMarker);
-        expect(byteLength(content)).toBeLessThanOrEqual(kind!.cap);
+        expect(content).toContain(kind.startMarker);
+        expect(content).toContain(kind.endMarker);
+        expect(byteLength(content)).toBeLessThanOrEqual(kind.cap);
       }
-    },
-  );
+    });
+  }
 
   it("never records the entry outline's ranges into the tool-return ledger", async () => {
     // The outline carries only names + line numbers, not implementation, so a

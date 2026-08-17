@@ -27,7 +27,8 @@ import {
   type ResolvedSymbol,
 } from "../candidates/heuristic.js";
 import { escapedByteLength, wrapUntrustedContext } from "./data-guard.js";
-import { MAX_ENTRY_OUTLINE_BYTES, byteLength } from "./limits.js";
+import { byteLength } from "./limits.js";
+import { injectedMessageKind } from "./message-kinds.js";
 
 export interface EntryOutline {
   /** The UNTRUSTED_DATA-wrapped block, guaranteed ≤ MAX_ENTRY_OUTLINE_BYTES. */
@@ -44,8 +45,11 @@ const OUTLINE_LEAD =
   "numbers, not implementation). Read a symbol's file range with repo_read_file " +
   "before citing it as evidence.";
 
+/** The registry entry for this block (single source for its cap and `kind`). */
+const OUTLINE_KIND = injectedMessageKind("entry_outline");
+
 const OUTLINE_WRAPPER_OVERHEAD = byteLength(
-  wrapUntrustedContext("", { kind: "entry_outline" }),
+  wrapUntrustedContext("", { kind: OUTLINE_KIND.kind }),
 );
 
 export async function buildEntryOutline(
@@ -80,7 +84,7 @@ export async function buildEntryOutline(
   // possible omission note — then fit whole files into what remains.
   const maxNoteBytes = byteLength(`\n\n… ${order.length} more entry file(s) omitted`);
   const contentBudget =
-    MAX_ENTRY_OUTLINE_BYTES - OUTLINE_WRAPPER_OVERHEAD - byteLength(OUTLINE_LEAD) - maxNoteBytes;
+    OUTLINE_KIND.cap - OUTLINE_WRAPPER_OVERHEAD - byteLength(OUTLINE_LEAD) - maxNoteBytes;
 
   let included = 0;
   let used = 0;
@@ -98,7 +102,7 @@ export async function buildEntryOutline(
   // Defense-in-depth hard cap (mirrors buildCarriedBlock): if the wrapped block
   // still overflows (future prose or a marker split across a separator), drop
   // whole files from the tail until it fits.
-  while (byteLength(wrapped) > MAX_ENTRY_OUTLINE_BYTES && included > 0) {
+  while (byteLength(wrapped) > OUTLINE_KIND.cap && included > 0) {
     included -= 1;
     wrapped = renderOutline(order, byFile, included);
   }
@@ -128,5 +132,5 @@ function renderOutline(
   if (omitted > 0) {
     parts.push(`… ${omitted} more entry file(s) omitted`);
   }
-  return wrapUntrustedContext(parts.join("\n\n"), { kind: "entry_outline" });
+  return wrapUntrustedContext(parts.join("\n\n"), { kind: OUTLINE_KIND.kind });
 }
