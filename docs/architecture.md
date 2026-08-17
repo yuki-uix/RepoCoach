@@ -200,7 +200,7 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 因此规定：**Reader 中任何新的文件访问路径（读取、搜索、遍历、未来的任何形态）必须同时通过两道闸，缺一不可**：
 
 1. **fs-guard 闸**：路径解析（含 realpath）后必须落在仓库根内；
-2. **filters 闸**：对请求路径**和** realpath 真实目标路径都执行同一套 `isReadablePath` 判定（扩展名白名单、路径黑名单、密钥文件名）；**大小上限不在 `isReadablePath` 内**——它依赖 stat / rg 的 `--max-filesize`，必须由每个访问路径显式执行（read-file 用 `isWithinSizeLimit`，search 用 `--max-filesize` 参数）。新增访问路径时这是最容易漏的一项，负向测试必须包含超大文件。
+2. **filters 闸**：对请求路径**和** realpath 真实目标路径都执行同一套 `isReadablePath` 判定（扩展名白名单、路径黑名单、密钥文件名、**文件名中的控制字符**）；文件名本身是仓库可控文本、且不经转义就进入 REPO_DATA 区块，名字里的换行会在"每行一个文件"的 tree 列表和 search 结果里伪造出多余条目——与伪造标记同一形态，因此在路径闸统一拒掉，一次覆盖全部四个出口（由 issue #31 的对抗性 fixture 发现）；**大小上限不在 `isReadablePath` 内**——它依赖 stat / rg 的 `--max-filesize`，必须由每个访问路径显式执行（read-file 用 `isWithinSizeLimit`，search 用 `--max-filesize` 参数）。新增访问路径时这是最容易漏的一项，负向测试必须包含超大文件。
 
 配套要求：
 
@@ -220,6 +220,17 @@ PR #14 的三个安全漏洞（ref 参数注入、search 绕过文件过滤、�
 - 新增任何"模型输出进入产品状态"的路径（未来的 recap 生成、UI 展示等）时，先问：这类数据已有的闸在哪，新路径过了吗。
 
 Review checklist：改动引入新的输出/保存路径时，diff 里必须能指出它复用的闸；指不出即打回。
+
+### 用测试代替人眼判断覆盖面（issue #31）
+
+上面两条规则靠复审执行时反复失效——清单能提醒"检查覆盖面"，但替不了"类别边界在哪"这一步判断，而出错的正是后一步。因此覆盖面本身写成测试：
+
+1. **枚举式覆盖测试**（`test/coverage/`）：出口列表来自导出的常量或类型（`REPO_TOOL_DEFINITIONS`、`featureCandidateSchema.shape`、`INJECTED_MESSAGE_KINDS`），新增出口自动纳入或自动失败。
+2. **属性测试**（`test/property/`）：对预算函数与解析器随机输入，断言 `∀ 输入, byteLength(最终输出) ≤ 上限` 一类不变式。
+3. **架构适应度测试**（`test/architecture/fitness.test.ts`）：把"哪些模块允许做危险的事"写成**带书面理由的显式白名单**，遍历 `src/**` 断言无白名单外的 `node:fs` / `node:child_process` 导入与 data-guard 标记构造。新增绕闸的文件会直接让测试失败，逼出一次有意识的决定。白名单条目缺理由本身即失败。
+4. **对抗性 fixture**（`fixtures/fixture-adversarial/`）：一份同时攻击每道闸的仓库（伪造标记、ANSI/C1、超长行、畸形 UTF-8、二进制伪装、越界说明符、逃逸符号链接、恶意 workspace glob、文件名控制字符、超限体积），由 `test/coverage/adversarial-fixture.test.ts` 推过全部出口。增量价值在于**同一份恶意输入过所有出口**：只覆盖 read-file 而漏掉 search 的闸会在这里失败。
+
+非目标：不追求零复审轮次。语义判断（如"候选生成的是新增功能而非现存链路"）任何自动化都发现不了，那种复审有价值。这四项压掉的是机械可判定的部分。
 
 ### Fixture eval
 

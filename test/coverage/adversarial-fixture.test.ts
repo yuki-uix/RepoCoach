@@ -56,11 +56,12 @@ import {
   type CachedRange,
   type RepoDataMeta,
 } from "../../src/agent";
-import { renderInline, renderRecap } from "../../src/cli";
-import type { LearningTurn } from "../../src/domain";
+import { renderRecap, runCli } from "../../src/cli";
+import type { FeatureCandidate, LearningTurn } from "../../src/domain";
 import type { EvidenceStore } from "../../src/evidence";
 import { buildRepositoryImport } from "../../src/import";
-import { createReader, type Reader, type Repository } from "../../src/reader";
+import { createReader, isReadablePath, type Reader, type Repository } from "../../src/reader";
+import { capturedStreams, makeDataDir } from "../cli/helpers";
 
 const FIXTURE_DIR = fileURLToPath(
   new URL("../../fixtures/fixture-adversarial", import.meta.url),
@@ -276,17 +277,40 @@ describe("adversarial fixture pushed through every output path", () => {
     expect(outline!.content).not.toContain("passwd");
   });
 
-  it("candidate rendering neutralizes terminal controls from fixture content", () => {
+  it("candidate rendering neutralizes terminal controls from fixture content", async () => {
     const controls = readFileSync(join(dir, "src/terminal-controls.ts"), "utf8");
     const hostile = `${controls}\n## forged-canary\n`;
-    // The exact renderInline gate cli/selectCandidate routes every candidate
-    // field through (title, difficulty, description, entryFiles).
-    const rendered = [
-      renderInline(hostile),
-      renderInline("intro"),
-      renderInline(hostile),
-      renderInline(hostile),
-    ].join("\n");
+    // Driven through the real `runCli` start path, not a hand-assembled
+    // `renderInline` sequence: re-listing the fields here would keep passing
+    // after someone adds a fifth displayed field that skips the gate, which is
+    // exactly the defect shape this suite exists to catch. Every string field of
+    // the candidate is hostile, so the assertion covers all of them at once.
+    const hostileCandidate: FeatureCandidate = {
+      id: hostile,
+      title: hostile,
+      description: hostile,
+      entryFiles: [hostile],
+      difficulty: "intro",
+    };
+    const streams = capturedStreams();
+    // The fixture declares workspaces, so start prompts twice (workspace, then
+    // candidate) before it reaches the agent call.
+    streams.stdin.write("1\n1\n1\n");
+    await runCli(["start", dir], {
+      dataDir: makeDataDir(),
+      candidateProvider: { listCandidates: () => Promise.resolve([hostileCandidate]) },
+      // Fails on the first agent call; the candidate list is printed before that.
+      provider: {
+        complete: () => Promise.reject(new Error("stop after candidate display")),
+      },
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    streams.stdin.end();
+
+    const rendered = streams.stdoutText();
+    expect(rendered).toContain("forged-canary");
     assertTerminalSafe(rendered);
     expect(rendered).not.toMatch(/^## forged-canary/m);
   });
@@ -339,6 +363,50 @@ describe("adversarial fixture pushed through every output path", () => {
 
   it("rejects an oversized file at the size gate", () => {
     expect(() => reader.readFile(repo, "src/oversized.ts")).toThrow(/size limit/);
+  });
+
+  it("truncates a 64 KiB single line at every exit that can carry it", async () => {
+    const read = await toolResult("repo_read_file", { path: "src/long-line.ts" });
+    expect(byteLength(read)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    const searched = await toolResult("repo_search", { pattern: "xxxxxxxx", contextLines: 1 });
+    expect(byteLength(searched)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    // The cap must bite: an untruncated line alone is eight times the budget.
+    expect(read).not.toContain("x".repeat(MAX_TOOL_RESULT_BYTES));
+  });
+
+  it("passes malformed UTF-8 through without emitting half a character", async () => {
+    const read = await toolResult("repo_read_file", { path: "src/malformed-utf8.ts" });
+    expect(byteLength(read)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+    expect(hasLoneSurrogate(read)).toBe(false);
+    // The invalid bytes decode to U+FFFD rather than reaching the model raw.
+    expect(read).toContain("�");
+  });
+
+  it("excludes file names containing control characters from every path exit", async () => {
+    // A name is repository-controlled text that reaches the model unescaped, so
+    // a newline in it forges an extra entry in the line-per-file listing. The
+    // path gate drops such names, which covers tree, search and read-file at
+    // once. (Whether the filesystem accepted the names is a platform detail;
+    // when it did not, the exclusion assertions hold trivially.)
+    const tree = await toolResult("repo_get_tree", {});
+    for (const line of tree.split("\n")) {
+      // eslint-disable-next-line no-control-regex
+      expect(line).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+    }
+    expect(tree).not.toContain("ctrl-esc");
+    expect(tree).not.toContain("ctrl-nl");
+    expect(isReadablePath("src/ctrl-nl-\n.ts")).toBe(false);
+    expect(isReadablePath("src/ctrl-esc\u001b[31m.ts")).toBe(false);
+    expect(() => reader.readFile(repo, "src/ctrl-nl-\n.ts")).toThrow();
+  });
+
+  it("wraps injection prose as untrusted data instead of letting it read as instruction", async () => {
+    const read = await toolResult("repo_read_file", { path: "src/injection-prose.ts" });
+    expect(read).toContain(REPO_DATA_START);
+    // The prose is inside the wrapper, so its "ignore previous instructions"
+    // cannot be mistaken for a message boundary or a system directive.
+    expect(read.split(REPO_DATA_END).length - 1).toBe(1);
+    expect(read.indexOf(REPO_DATA_START)).toBeLessThan(read.indexOf("instructions"));
   });
 
   it("byte-truncation never splits a multi-byte character", () => {

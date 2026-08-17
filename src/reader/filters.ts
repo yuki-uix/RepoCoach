@@ -50,8 +50,23 @@ export interface FileFilterOptions {
   maxFileSize?: number;
 }
 
-/** Path-level blacklist: excluded directories, secret files, minified bundles. */
+/**
+ * Control characters (C0, DEL, C1) that may never appear in a path the reader
+ * hands out. A file name is repository-controlled text that reaches the model
+ * unescaped inside the REPO_DATA wrapper — a name containing a newline forges an
+ * extra entry in the line-per-file tree listing and in search results, the same
+ * structure-forgery the marker escaping exists to prevent. Excluding such names
+ * at the path gate covers every exit at once (tree, search, read-file,
+ * package-info), since they all route through `isReadablePath`.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Path-level blacklist: control characters, excluded dirs, secrets, minified bundles. */
 export function isPathExcluded(relPath: string): boolean {
+  if (CONTROL_CHAR_RE.test(relPath)) {
+    return true;
+  }
   const normalized = toPosix(relPath);
   for (const segment of normalized.split("/")) {
     if ((EXCLUDED_DIR_NAMES as readonly string[]).includes(segment)) {

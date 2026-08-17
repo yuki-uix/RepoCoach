@@ -142,9 +142,9 @@ const FS_ACCESS_ALLOWED: WhitelistEntry[] = [
 /** A module specifier `"node:fs"` / `"node:fs/promises"` in any import form. */
 const FS_SPECIFIER_RE = /["']node:fs(?:\/promises)?["']/g;
 
-function fsAccessViolations(): string[] {
+function fsAccessViolations(scanned: SourceFile[] = files): string[] {
   const violations: string[] = [];
-  for (const file of files) {
+  for (const file of scanned) {
     if (isAllowed(file.rel, FS_ACCESS_ALLOWED)) {
       continue;
     }
@@ -175,9 +175,9 @@ const SUBPROCESS_ALLOWED: WhitelistEntry[] = [
 
 const CHILD_PROCESS_SPECIFIER_RE = /["']node:child_process["']/g;
 
-function subprocessViolations(): string[] {
+function subprocessViolations(scanned: SourceFile[] = files): string[] {
   const violations: string[] = [];
-  for (const file of files) {
+  for (const file of scanned) {
     if (isAllowed(file.rel, SUBPROCESS_ALLOWED)) {
       continue;
     }
@@ -215,9 +215,9 @@ const BOUNDARY_MARKERS = [
   UNTRUSTED_DATA_END,
 ];
 
-function markerViolations(): string[] {
+function markerViolations(scanned: SourceFile[] = files): string[] {
   const violations: string[] = [];
-  for (const file of files) {
+  for (const file of scanned) {
     if (isAllowed(file.rel, MARKER_ALLOWED)) {
       continue;
     }
@@ -264,5 +264,41 @@ describe("architecture fitness (whitelist for dangerous operations)", () => {
 
   it("no file outside data-guard.ts constructs a data-guard marker literal", () => {
     expect(markerViolations()).toEqual([]);
+  });
+
+  // Without this, all three rules above would keep passing if the scanner, the
+  // whitelist matcher or a regex silently stopped matching anything — a green
+  // suite that checks nothing is the worst outcome for a fitness test.
+  it("each rule actually fires on a synthetic violation", () => {
+    const offender = (content: string): SourceFile[] => [
+      { rel: "src/agent/newcomer.ts", content },
+    ];
+
+    const fs = fsAccessViolations(offender('import { readFileSync } from "node:fs";\n'));
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toContain("src/agent/newcomer.ts:1");
+    expect(fs[0]).toContain(HINT);
+
+    expect(
+      subprocessViolations(offender('import { execFile } from "node:child_process";\n')),
+    ).toHaveLength(1);
+
+    expect(markerViolations(offender(`const forged = "${REPO_DATA_START}";\n`))).toHaveLength(1);
+
+    // And a whitelisted module with the same content is not flagged.
+    expect(
+      fsAccessViolations([
+        { rel: "src/reader/newcomer.ts", content: 'import { readFileSync } from "node:fs";\n' },
+      ]),
+    ).toEqual([]);
+  });
+
+  // The comment stripper must not mask a real construction, only prose.
+  it("ignores a marker mentioned in a comment but not one in code", () => {
+    expect(
+      markerViolations([
+        { rel: "src/agent/doc.ts", content: `// mentions ${REPO_DATA_START} in prose\n` },
+      ]),
+    ).toEqual([]);
   });
 });
