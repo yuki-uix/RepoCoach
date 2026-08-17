@@ -10,6 +10,7 @@ import type {
 } from "../../src/domain";
 import {
   DEFAULT_BUDGET,
+  DEFAULT_MAX_TURNS,
   Orchestrator,
   type AgentInvocation,
   type AgentInvoker,
@@ -257,6 +258,50 @@ describe.each(STORE_CASES)("Orchestrator ($name)", ({ makeStore, cleanup }) => {
     expect(last.decisionOverridden).toBe(true);
     expect(store.getSession(sessionId)?.phase).toBe("recap");
     expect(store.getSession(sessionId)?.turnCount).toBe(5);
+  });
+
+  it("caps at three questions when maxTurns is 3", async () => {
+    const { agent } = stubAgent((input) => {
+      switch (input.phase) {
+        case "orientation":
+          return { decision: decision({ nextAction: "show_evidence" }), usage: USAGE };
+        case "hypothesis":
+          return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+        case "trace":
+          return {
+            decision: decision({ evidence: [EVIDENCE], nextAction: "show_evidence" }),
+            usage: USAGE,
+          };
+        case "questioning":
+          return { decision: decision({ question: "q", nextAction: "ask" }), usage: USAGE };
+        case "feedback":
+          return {
+            decision: decision({ assessment: "correct", question: "probe deeper?", nextAction: "ask" }),
+            usage: USAGE,
+          };
+        default:
+          throw new Error(`unexpected phase ${input.phase}`);
+      }
+    });
+    const { orchestrator, sessionId } = makeOrchestrator(agent, { maxTurns: 3 });
+
+    await orchestrator.step(); // orientation → hypothesis
+    await orchestrator.step(); // prediction (turn 1)
+    await orchestrator.step("a"); // → trace
+    await orchestrator.step(); // → questioning
+    await orchestrator.step(); // follow-up (turn 2)
+    await orchestrator.step("a"); // → feedback
+    await orchestrator.step(); // probe deeper (turn 3) → questioning
+    await orchestrator.step("a"); // → feedback
+    const last = await orchestrator.step(); // 4th probe attempt → recap
+
+    expect(last.phase).toBe("recap");
+    expect(last.decisionOverridden).toBe(true);
+    expect(store.getSession(sessionId)?.turnCount).toBe(3);
+  });
+
+  it("defaults maxTurns to 3", () => {
+    expect(DEFAULT_MAX_TURNS).toBe(3);
   });
 
   it("counts the feedback probe-deeper question toward the turn limit", async () => {
