@@ -159,6 +159,19 @@ pnpm eval:real
 
 两种模式每次都同时跑「活会话 eval」与「judge eval」，只有 provider 不同。输出两份：stdout 的人类可读表格（分两节），以及仓库根目录 `eval-report.json`（机器可读，含完整 run——每轮的问题/回答/assessment/evidence/usage——供事后诊断与优化前后对比；已加入 `.gitignore`）。可用 `node dist/eval/bin.js mock --out <path>` 覆盖 JSON 输出位置。
 
+### 真实仓库成本对比（bench）
+
+`pnpm eval:bench` 用 `fixtures/benchmarks/real-repos.json` 里的钉死基准做**可重复**的成本对比。每条基准把仓库钉到某个 commit SHA、把功能钉到固定的 `(featureId, featureGoal, entryFiles)` 三元组，再喂脚本化答案——这样同一基准的每次 run 都探索同一条代码路径，改动前后才有可比性。每条基准跑 N 次，每项指标报告**中位数与 (min–max)**（而不是单次值或平均值，避免单个离群 run 带偏）。
+
+```bash
+pnpm build                       # bench 脚本同样跑 dist/eval/bin.js
+
+pnpm eval:bench                  # 跑全部基准，每条 3 次，JSON 写到 bench-report.json
+pnpm eval:bench --runs 5 --benchmark zod --out /tmp/zod.json
+```
+
+**这个模式不进 CI**：每次运行都是真实模型调用、花真钱。它是手动触发的对比工具，用法是「改动前跑一次、改动后跑一次」，再 diff 两份 `bench-report.json`（JSON 保留每次 run 的原始值，不只存汇总）。
+
 ## 文档
 
 - [MVP 规格](./docs/mvp-spec.md)

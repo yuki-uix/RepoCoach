@@ -136,4 +136,30 @@ describe("eval:mock end to end", () => {
     // preloaded on the first turn.
     expect(report.run.entryOutlineBytes).toHaveLength(1);
   });
+
+  it("records provider_request payload figures and the store's turnCount", async () => {
+    const streams = capturedStreams();
+
+    const report = await runEval("mock", {
+      repoRoot,
+      repositoryPath: fixtureRoot,
+      stdout: streams.stdout,
+      out: tempOut(),
+    });
+
+    const run = report.run;
+    // The mock's primary session makes exactly 8 provider calls; every request
+    // carries a non-zero payload, and the trace's read call carries tool bytes.
+    expect(run.providerRequests).toHaveLength(8);
+    expect(run.providerRequests.every((request) => request.bytes > 0)).toBe(true);
+    expect(
+      run.providerRequests.reduce((sum, request) => sum + request.toolResultBytes, 0),
+    ).toBeGreaterThan(0);
+    expect(
+      run.providerRequests.reduce((sum, request) => sum + request.compressibleBytes, 0),
+    ).toBeGreaterThan(0);
+    // Completed questions come from the persisted session's turnCount (prediction
+    // + follow-up), not from counting the turns array.
+    expect(run.turnCount).toBe(2);
+  });
 });

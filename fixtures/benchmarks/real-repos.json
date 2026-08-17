@@ -1,0 +1,26 @@
+[
+  {
+    "name": "zod",
+    "repositoryId": "https://github.com/colinhacks/zod#0000000000000000000000000000000000000000",
+    "featureId": "schema-parse",
+    "featureGoal": "Trace how a Zod schema validates a value through _parse and turns a failed check into a ZodError.",
+    "entryFiles": ["src/types.ts"],
+    "answers": [
+      "I think z.string() builds a ZodString object, and calling .parse() on it runs an internal _parse that checks the value's type and throws a ZodError listing every failed check.",
+      "The error messages come from an issue map in the schema — each check adds an issue with a code like invalid_type, and ZodError formats them with the path to the failing field.",
+      "I am not sure how custom refinements and transforms fit in — whether they run inside the same _parse pipeline or after it."
+    ]
+  },
+  {
+    "name": "hono",
+    "repositoryId": "https://github.com/honojs/hono#0000000000000000000000000000000000000000",
+    "featureId": "request-dispatch",
+    "featureGoal": "Trace how an incoming HTTP request is routed through Hono to its handler and how middleware wraps that handler.",
+    "entryFiles": ["src/hono-base.ts", "src/compose.ts"],
+    "answers": [
+      "A request comes in through app.fetch, Hono looks up the matched route in the router, then runs the handler with a Context that wraps the request and response.",
+      "Middleware are composed left-to-right so each one can short-circuit before the handler runs, like a Koa onion model.",
+      "I think the router is a trie mapping method + path patterns to handlers, but I am not sure how it handles path params."
+    ]
+  }
+]
