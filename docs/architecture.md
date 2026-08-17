@@ -1,5 +1,14 @@
 # RepoCoach Architecture
 
+> **导读。** 这份文档是「轮子长什么样」的完整表述——模块边界、状态机、安全边界。它是随开发过程增量写成的，比较长；如果你只是想知道这个 agent 的骨架，**整个架构真正由四条规则决定，其余都是细节**：
+>
+> 1. **文件访问双闸**（§6）—— 每条访问路径都要过 fs-guard（realpath 收敛在仓库根内）**和** filters（扩展名、黑名单、密钥名、文件名控制字符）。四个出口 read-file / search / tree / package-info 无一例外。
+> 2. **仓库内容永远是数据**（§1、§3 Agent Loop）—— 包裹在 `REPO_DATA` 标记内，永不进 system prompt。
+> 3. **状态机由应用层持有**（§4、§5）—— `phase` 是 Orchestrator 的状态，作为入参传给模型；模型输出的 `nextAction` 只是建议。
+> 4. **构造性证据接地**（§1、§3 Evidence Store）—— 只接受本轮工具真实返回过的 (path, 行号)，服务端账本做交集校验。
+>
+> 这四条是所有 review 争论的来源。项目的实测结论（成本、KV cache、状态持久化、prompt 出口闸、多模型协作）见 [README](../README.md)，那里是「哪些结论值得抄走」；本文是「实现长什么样」。
+
 ## 1. 设计原则
 
 ### 源码证据优先
@@ -271,6 +280,12 @@ Review checklist：改动引入新的输出/保存路径时，diff 里必须能�
 **真实仓库成本对比（bench 模式，`pnpm eval:bench`）** 是对 real 模式的补充：`fixtures/benchmarks/real-repos.json` 把每条基准钉死到（仓库 SHA、功能三元组、脚本化答案），同一条基准跑 N 次，每项指标报告中位数与 (min–max)，复用 `runEvalSession`（不另建并行 runner）。它测量单次 provider 调用峰值字节、`toolResultBytes` 与 `compressibleBytes` 之和、provider 调用次数、分工具的调用次数、input/output token，以及「完成问题数」（取 session 的 `turnCount`，不数 turns 数组——recap/降级 turn 也在里面，会数错）。这个模式**不进 CI**：每次运行都是真实模型调用、花真钱，是手动触发的改动前后对比工具。
 
 ## 8. 实施顺序
+
+> **实际结果（2026-08，项目已停止）：** 第一阶段的 1–5 全部完成（issue #1–#39，22 个合并 PR，638 个测试）。**第 6 步没有完成**——Zod 与 Hono 上 session 在问完 3 个问题前就耗尽预算（Hono 完成 1 问，Zod 0–1 问），"提问优于总结"的假设**从未被测试**。
+>
+> 更根本的问题是：这份计划里的第 6 步本身设计得不对。它写的是"用真实仓库验证假设"，但假设里的"**优于**总结"需要**对照实验**，而整套 eval 指标全是 RepoCoach 和自己比，没有对照组。即使成本问题解决，第 6 步也回答不了它要回答的问题。
+>
+> 第二阶段（7–9）未开始。停止原因见 [README 的「产品结论」](../README.md#产品结论)。
 
 第一阶段（CLI 垂直切片，验证核心假设）：
 
