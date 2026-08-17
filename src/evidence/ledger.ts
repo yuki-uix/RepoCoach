@@ -33,6 +33,11 @@ export class ToolReturnLedger {
   private ranges: RecordedRange[] = [];
   /** Ranges carried into this turn's context (from the session read cache). */
   private carried: RecordedRange[] = [];
+  /**
+   * Ranges already validated and saved this turn. Grounded for the rest of the
+   * turn regardless of the compression window; see `recordValidated`.
+   */
+  private validated: RecordedRange[] = [];
   /** The current within-turn round `record` tags new ranges with. */
   private currentRound = 0;
 
@@ -67,6 +72,30 @@ export class ToolReturnLedger {
    */
   revokeRound(round: number): void {
     this.ranges = this.ranges.filter((range) => range.round !== round);
+  }
+
+  /**
+   * Record a range that already passed validation and was saved to the Evidence
+   * Store this turn. Such a range stays citable for the rest of the turn even
+   * after the compression window revokes the round that produced it: the model
+   * saw the content at the moment it made the claim, and the claim was checked
+   * then. Re-citing it in `submit_decision` is a reference to an already
+   * validated claim, not a new one, so revoking it would make the loop reject
+   * the model's own accepted evidence and fail the turn.
+   *
+   * Deliberately a list of its own rather than a push into `carried`: `carried`
+   * also drives `hasCarried`, which tells the read tool "the content is already
+   * in context, do not re-send it". After compression that is false, so reusing
+   * `carried` here would suppress a re-read of content the model can no longer
+   * see.
+   */
+  recordValidated(path: string, startLine: number, endLine: number): void {
+    this.validated.push({
+      path: normalizePath(path),
+      startLine,
+      endLine,
+      round: -1,
+    });
   }
 
   /**
@@ -126,13 +155,18 @@ export class ToolReturnLedger {
       range.path === path &&
       range.startLine <= claim.startLine &&
       claim.endLine <= range.endLine;
-    return this.ranges.some(contained) || this.carried.some(contained);
+    return (
+      this.ranges.some(contained) ||
+      this.carried.some(contained) ||
+      this.validated.some(contained)
+    );
   }
 
   /** Clear every recorded range (start of a new turn). */
   resetTurn(): void {
     this.ranges = [];
     this.carried = [];
+    this.validated = [];
     this.currentRound = 0;
   }
 }

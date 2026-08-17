@@ -137,6 +137,25 @@ describe("ToolReturnLedger round revocation", () => {
     expect(ledger.isGrounded(claim("src/b.ts", 1, 5))).toBe(false);
   });
 
+  // Without this, compression would revoke ranges the model had already saved
+  // as accepted evidence, and submit_decision would reject the model's own
+  // evidence — failing the turn instead of just costing fewer tokens.
+  it("keeps an already-validated range citable after its round is revoked", () => {
+    const ledger = new ToolReturnLedger();
+    ledger.setRound(0);
+    ledger.record("src/index.ts", 1, 10);
+    ledger.recordValidated("src/index.ts", 2, 4); // saved while still visible
+
+    ledger.revokeRound(0);
+
+    expect(ledger.isGrounded(claim("src/index.ts", 2, 4))).toBe(true);
+    // Only what was actually saved survives; the rest of the round is gone.
+    expect(ledger.isGrounded(claim("src/index.ts", 1, 10))).toBe(false);
+    // And it does not masquerade as content still present in the context, so a
+    // re-read is not suppressed.
+    expect(ledger.hasCarried("src/index.ts", 2, 4)).toBe(false);
+  });
+
   it("resetTurn clears the round association for the next turn", () => {
     const ledger = new ToolReturnLedger();
     ledger.setRound(3);

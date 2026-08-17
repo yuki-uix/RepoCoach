@@ -44,6 +44,17 @@ export class GroundingEvidenceValidator implements EvidenceValidator {
       };
     }
     this.options.store.save(this.options.sessionId, this.turnIndex, evidence);
+    // Keep the accepted range citable for the rest of the turn even after the
+    // same-turn compression window (issue #36) revokes the round that produced
+    // it: the claim was checked while the model could see the content, and
+    // repeating it in `submit_decision` refers to that accepted claim rather
+    // than making a new one. Without this the loop would reject the model's own
+    // saved evidence and fail the turn.
+    this.options.ledger.recordValidated(
+      evidence.path,
+      evidence.startLine,
+      evidence.endLine,
+    );
     return { ok: true };
   }
 }
