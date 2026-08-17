@@ -74,7 +74,8 @@ class EventSink {
           this.stderr.write(
             dim(
               `  [req] round=${event.round} msgs=${event.messageCount} ` +
-                `bytes=${event.bytes} toolResultBytes=${event.toolResultBytes}`,
+                `bytes=${event.bytes} toolResultBytes=${event.toolResultBytes} ` +
+                `compressibleBytes=${event.compressibleBytes}`,
             ) + "\n",
           );
         }

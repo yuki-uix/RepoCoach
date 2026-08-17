@@ -1145,4 +1145,53 @@ describe("AgentLoop same-turn window compression", () => {
     // bytes fall below the previous round even though a new (tiny) result joined.
     expect(requests[4]?.toolResultBytes).toBeLessThan(requests[3]!.toolResultBytes);
   });
+
+  // `toolResultBytes` counts every tool-role message; `compressibleBytes` counts
+  // only what the window may replace. The gap is the tool payload compression
+  // can never remove, so the two must not be allowed to drift into meaning the
+  // same thing.
+  it("separates all tool-role bytes from the window-eligible subset", async () => {
+    const files = { "src/index.ts": "export const a = 1;\nexport const b = 2;\n" };
+    const { provider } = scriptedProvider((index) => {
+      if (index === 0) {
+        return toolMessage(
+          "c0",
+          "repo_read_file",
+          JSON.stringify({ path: "src/index.ts", startLine: 1, endLine: 2 }),
+        );
+      }
+      if (index === 1) {
+        // A save_evidence receipt: a tool-role message that is exempt from
+        // compression by design, so it counts in one figure but not the other.
+        return toolMessage(
+          "c1",
+          "repo_save_evidence",
+          JSON.stringify({
+            items: [{ path: "src/index.ts", startLine: 1, endLine: 2, reason: "r" }],
+          }),
+        );
+      }
+      return toolMessage("submit", "submit_decision", DECISION);
+    });
+    const ledger = new ToolReturnLedger();
+    const events: AgentLoopEvent[] = [];
+    const loop = makeLoopWithFiles(files, provider, {
+      ledger,
+      evidenceValidator: new GroundingEvidenceValidator({
+        ledger,
+        store: new InMemoryEvidenceStore(),
+        sessionId: "s1",
+      }),
+      onEvent: (event) => events.push(event),
+    });
+
+    await loop.invoke({ phase: "trace", featureGoal: "g", turnHistory: [] });
+
+    const requests = events.filter((event) => event.type === "provider_request");
+    const last = requests.at(-1)!;
+    // The receipt is inside toolResultBytes but outside compressibleBytes.
+    expect(last.compressibleBytes).toBeGreaterThan(0);
+    expect(last.toolResultBytes).toBeGreaterThan(last.compressibleBytes);
+    expect(last.bytes).toBeGreaterThan(last.toolResultBytes);
+  });
 });

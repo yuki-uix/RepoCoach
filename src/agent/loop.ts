@@ -99,18 +99,25 @@ export type AgentLoopEvent =
     }
   | {
       /**
-       * One provider call's outgoing message payload, for issue #36. `bytes` is
-       * everything sent; `toolResultBytes` is the part contributed by tool
-       * results accumulated earlier in this same turn — the share a same-turn
-       * compression window could remove. Measuring precedes any compression
-       * work, because a paper estimate of this ratio has already been wrong
-       * once (issue #33).
+       * One provider call's outgoing message payload, for issue #36. Measuring
+       * precedes any compression work, because a paper estimate of this ratio
+       * has already been wrong once (issue #33).
+       *
+       * The two tool figures are deliberately distinct, and the gap between
+       * them is itself the interesting number — it is the tool payload the
+       * window can never remove:
+       * - `toolResultBytes`: every `role: "tool"` message, including the
+       *   `repo_save_evidence` receipts and the decision-correction messages
+       *   that are exempt from compression by design.
+       * - `compressibleBytes`: only the repo-data results the window is
+       *   eligible to replace (the `COMPRESSIBLE_TOOLS` set).
        */
       type: "provider_request";
       round: number;
       messageCount: number;
       bytes: number;
       toolResultBytes: number;
+      compressibleBytes: number;
     }
   | { type: "carried_context"; bytes: number; turnIndex: number }
   | { type: "entry_outline"; bytes: number; turnIndex: number };
@@ -310,7 +317,12 @@ export class AgentLoop {
         forceMessageAdded = true;
       }
 
-      const result = await this.callProvider(messages, tools, round);
+      const result = await this.callProvider(
+        messages,
+        tools,
+        round,
+        new Set(toolResultRecords.map((record) => record.messageIndex)),
+      );
       usage.inputTokens += result.usage.inputTokens;
       usage.outputTokens += result.usage.outputTokens;
       messages.push(result.message);
@@ -556,6 +568,7 @@ export class AgentLoop {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     round = 0,
+    compressibleIndices: ReadonlySet<number> = new Set(),
   ): Promise<{ message: ChatMessage; usage: TokenUsage }> {
     this.emit({
       type: "provider_request",
@@ -563,6 +576,9 @@ export class AgentLoop {
       messageCount: messages.length,
       bytes: messagesByteLength(messages),
       toolResultBytes: messagesByteLength(messages.filter((m) => m.role === "tool")),
+      compressibleBytes: messagesByteLength(
+        messages.filter((_, index) => compressibleIndices.has(index)),
+      ),
     });
     const onProviderEvent = (event: ChatProviderEvent): void => {
       this.emit({ type: "text_delta", delta: event.delta });
