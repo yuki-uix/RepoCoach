@@ -97,6 +97,21 @@ export type AgentLoopEvent =
       /** 0-based turn index the read happened in. */
       turnIndex: number;
     }
+  | {
+      /**
+       * One provider call's outgoing message payload, for issue #36. `bytes` is
+       * everything sent; `toolResultBytes` is the part contributed by tool
+       * results accumulated earlier in this same turn — the share a same-turn
+       * compression window could remove. Measuring precedes any compression
+       * work, because a paper estimate of this ratio has already been wrong
+       * once (issue #33).
+       */
+      type: "provider_request";
+      round: number;
+      messageCount: number;
+      bytes: number;
+      toolResultBytes: number;
+    }
   | { type: "carried_context"; bytes: number; turnIndex: number }
   | { type: "entry_outline"; bytes: number; turnIndex: number };
 
@@ -286,7 +301,7 @@ export class AgentLoop {
         forceMessageAdded = true;
       }
 
-      const result = await this.callProvider(messages, tools);
+      const result = await this.callProvider(messages, tools, round);
       usage.inputTokens += result.usage.inputTokens;
       usage.outputTokens += result.usage.outputTokens;
       messages.push(result.message);
@@ -476,7 +491,15 @@ export class AgentLoop {
   private async callProvider(
     messages: ChatMessage[],
     tools: ToolDefinition[],
+    round = 0,
   ): Promise<{ message: ChatMessage; usage: TokenUsage }> {
+    this.emit({
+      type: "provider_request",
+      round,
+      messageCount: messages.length,
+      bytes: messagesByteLength(messages),
+      toolResultBytes: messagesByteLength(messages.filter((m) => m.role === "tool")),
+    });
     const onProviderEvent = (event: ChatProviderEvent): void => {
       this.emit({ type: "text_delta", delta: event.delta });
     };
@@ -553,6 +576,23 @@ function pathOfTool(name: string, args: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Wire size of a message list: text content plus the JSON of any tool-call
+ * arguments. An approximation of what the provider bills — exact token counts
+ * are provider-side — but it is the same measure before and after compression,
+ * which is what issue #36 needs.
+ */
+function messagesByteLength(messages: ChatMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    total += byteLength(message.content ?? "");
+    for (const call of message.toolCalls ?? []) {
+      total += byteLength(call.name) + byteLength(call.arguments);
+    }
+  }
+  return total;
 }
 
 function buildTurnInstruction(input: AgentInvokerInput): string {

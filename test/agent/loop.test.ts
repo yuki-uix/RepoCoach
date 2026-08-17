@@ -122,13 +122,23 @@ describe("AgentLoop", () => {
     await loop.invoke({ phase: "feedback", featureGoal: "g", turnHistory: [] });
 
     expect(events.map((event) => event.type)).toEqual([
+      "provider_request",
       "text_delta",
       "tool_call_started",
       "tool_result",
+      "provider_request",
       "text_delta",
       "tool_call_started",
       "decision_submitted",
     ]);
+
+    // The second call resends the first call's tool result, which is the cost
+    // issue #36 is about: measure it here so the ordering test also pins the
+    // meaning of the numbers.
+    const requestEvents = events.filter((event) => event.type === "provider_request");
+    expect(requestEvents[0]?.toolResultBytes).toBe(0);
+    expect(requestEvents[1]?.toolResultBytes).toBeGreaterThan(0);
+    expect(requestEvents[1]?.bytes).toBeGreaterThan(requestEvents[0]!.bytes);
   });
 
   it("nudges plain-text responses instead of accepting them as decisions", async () => {
